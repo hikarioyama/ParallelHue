@@ -173,6 +173,23 @@ The repository provides sanitized measurement records and public examples
 without private infrastructure details or raw model/token streams; these
 source files are not a wheel or sdist contents claim.
 
+## Roadmap and community
+
+ParallelHue is intended to grow beyond its current vLLM integration. The
+roadmap includes adapters for more inference engines and richer visibility into
+speculative decoding systems, including MTP and DFlash-style approaches. The
+long-term goal is to build an open ecosystem around truthful inference
+visualization and make ParallelHue a broadly used, interoperable industry
+standard rather than a viewer tied to one engine.
+
+The current maintainers can test CUDA deployments on NVIDIA SM120 hardware, but
+do not have access to MLX environments or non-SM120 hardware. Compatibility
+reports are therefore especially valuable. Reports of working and blocked
+configurations, detailed issues, adapter proposals, and pull requests are all
+welcome. Please include the inference engine and version, model family,
+hardware, operating mode, and the observed result, while excluding credentials
+and raw private model output.
+
 ## License
 
 MIT; see [LICENSE](LICENSE).
