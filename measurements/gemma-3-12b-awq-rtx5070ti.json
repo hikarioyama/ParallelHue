@@ -1,0 +1,122 @@
+{
+  "$schema": "./compatibility-schema-v1.json",
+  "schema_version": 1,
+  "verdict": "BLOCKED_BEFORE_SERVER_HEALTH",
+  "model": {
+    "requested_identity": "Gemma 4 12B",
+    "actual_identity": "Gemma 3 12B",
+    "repo": "gaunernst/gemma-3-12b-it-int4-awq",
+    "base_model": "google/gemma-3-12b-it",
+    "revision": "3b0c67b98eee8fb90633ef1bfbf3d39f43b9cf9d",
+    "architecture": "Gemma3ForConditionalGeneration",
+    "parameters": { "value": 12187325040, "unit": "parameters", "kind": "observed", "n": 1, "same_condition": false },
+    "quantization": {
+      "method": "AWQ INT4",
+      "bits": { "value": 4, "unit": "bits", "kind": "condition", "n": 1, "same_condition": false },
+      "group_size": { "value": 32, "unit": "weights", "kind": "condition", "n": 1, "same_condition": false },
+      "zero_point": true,
+      "version": "gemm",
+      "unquantized_modules": ["lm_head", "vision_tower"]
+    }
+  },
+  "hardware": {
+    "gpu_index": { "value": 2, "unit": "GPU index", "kind": "condition", "n": 1, "same_condition": false },
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "gpu_count": { "value": 1, "unit": "GPU", "kind": "condition", "n": 1, "same_condition": false },
+    "vram": { "value": 16303, "unit": "MiB", "kind": "observed", "n": 1, "same_condition": false },
+    "driver": "595.71.05",
+    "driver_cuda": "13.2"
+  },
+  "software": {
+    "vllm": "0.26.0",
+    "torch": "2.11.0+cu130",
+    "torch_cuda": "13.0",
+    "flashinfer_python": "0.6.14",
+    "flashinfer_cubin": "0.6.8.post1",
+    "parallelhue": "0.1.0"
+  },
+  "guardrails": {
+    "guarded": true,
+    "environment": {
+      "CUDA_VISIBLE_DEVICES": "2",
+      "HF_HUB_OFFLINE": "1",
+      "VLLM_PLUGINS": "parallelhue",
+      "PARALLELHUE_VLLM_EXACT": "1"
+    },
+    "resource_limits": {
+      "MemoryMax": "100G",
+      "MemorySwapMax": "0",
+      "TORCHINDUCTOR_COMPILE_THREADS": "6",
+      "MAX_JOBS": "6",
+      "NVCC_THREADS": "2"
+    },
+    "socket_mode": "0700"
+  },
+  "server_flags": [
+    "--served-model-name gemma-3-12b-it-awq",
+    "--host 127.0.0.1",
+    "--port 18082",
+    "--max-model-len 2048",
+    "--max-num-seqs 1",
+    "--gpu-memory-utilization 0.88",
+    "--enforce-eager",
+    "--language-model-only"
+  ],
+  "launch_attempts": [
+    {
+      "backend": "FLASH_ATTN",
+      "exit_status": { "value": 1, "unit": "process exit status", "kind": "observed", "n": 1, "same_condition": false },
+      "health": false,
+      "blocker": "Gemma3 partial multimodal token full attention / mm_prefix requires FlashAttention v4, unavailable for this head size"
+    },
+    {
+      "backend": "auto",
+      "exit_status": { "value": 1, "unit": "process exit status", "kind": "observed", "n": 1, "same_condition": false },
+      "health": false,
+      "blocker": "flashinfer-python 0.6.14 and flashinfer-cubin 0.6.8.post1 version mismatch"
+    },
+    {
+      "backend": "FLASHINFER with FLASHINFER_DISABLE_VERSION_CHECK=1",
+      "exit_status": { "value": 1, "unit": "process exit status", "kind": "observed", "n": 1, "same_condition": false },
+      "health": false,
+      "blocker": "FLASHINFER does not support partial multimodal token full attention for this Gemma3 configuration"
+    },
+    {
+      "backend": "TRITON_ATTN",
+      "exit_status": { "value": 1, "unit": "process exit status", "kind": "observed", "n": 1, "same_condition": false },
+      "health": false,
+      "blocker": "Triton supports mm_prefix, but vLLM sampler initialization still imports FlashInfer and hits the same package version mismatch"
+    }
+  ],
+  "validation": {
+    "exact": {
+      "status": "NOT_RUN_SERVER_NEVER_HEALTHY",
+      "n": 0,
+      "same_condition": "N/A",
+      "kind": "observed"
+    },
+    "fallback": {
+      "status": "NOT_RUN_SERVER_NEVER_HEALTHY",
+      "n": 0,
+      "same_condition": "N/A",
+      "kind": "observed"
+    },
+    "event_count": { "value": 0, "unit": "events", "kind": "observed", "n": 0, "same_condition": "N/A" },
+    "sequence_count": { "value": 0, "unit": "sequences", "kind": "observed", "n": 0, "same_condition": "N/A" },
+    "step_id_count": { "value": 0, "unit": "scheduler steps", "kind": "observed", "n": 0, "same_condition": "N/A" },
+    "color_slot_count": { "value": 0, "unit": "color slots", "kind": "observed", "n": 0, "same_condition": "N/A" },
+    "finished_count": { "value": 0, "unit": "finished events", "kind": "observed", "n": 0, "same_condition": "N/A" },
+    "terminal_completion": "NOT_OBSERVED",
+    "text_token_ids_byte_identical": "NOT_OBSERVED"
+  },
+  "restoration": {
+    "restored": true,
+    "summary": "Host workload and health checks were restored; desktop responsiveness checks remained healthy."
+  },
+  "provenance": {
+    "source": "official-vllm-0.26-live-capture",
+    "captured_at": "2026-08-04T16:06:31+09:00",
+    "sanitized": true,
+    "caveat": "The requested Gemma 4 12B was not available locally; this run tested Gemma 3 12B AWQ. The server never became healthy, so exact and fallback validation were not run."
+  }
+}

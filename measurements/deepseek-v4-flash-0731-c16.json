@@ -1,0 +1,203 @@
+{
+  "$schema": "./schema-v1.json",
+  "schema_version": 1,
+  "model": "DeepSeek-V4-Flash-0731",
+  "hardware": {
+    "gpu_model": "NVIDIA RTX PRO 6000 Blackwell",
+    "gpu_count": {
+      "value": 2,
+      "unit": "GPU",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    }
+  },
+  "software": {
+    "vllm_revision": "1e9c9c3475fa30ab48d5639f8882f1e93bb552bf",
+    "sparkinfer_revision": "eec30ff294c1870b59a04686fff6608fddb62089"
+  },
+  "server": {
+    "tensor_parallel_size": {
+      "value": 2,
+      "unit": "GPU",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "max_model_len": {
+      "value": 524288,
+      "unit": "tokens",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "max_num_seqs": {
+      "value": 16,
+      "unit": "requests",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "max_num_batched_tokens": {
+      "value": 4096,
+      "unit": "tokens",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "block_size": {
+      "value": 256,
+      "unit": "tokens",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "prefix_cache": true,
+    "gpu_memory_utilization": {
+      "value": 0.975,
+      "unit": "fraction",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "cpu_kv_cache": {
+      "value": 48.5,
+      "unit": "GiB",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "gpu_kv_cache_dtype": "FP8",
+    "offload": {
+      "backend": "instanttensor",
+      "mode": "buffered"
+    },
+    "speculative": {
+      "backend": "DSpark",
+      "variant": "b12x-a8",
+      "depth": {
+        "value": 5,
+        "unit": "K",
+        "kind": "condition",
+        "n": 1,
+        "same_condition": false
+      }
+    }
+  },
+  "request": {
+    "concurrency": {
+      "value": 16,
+      "unit": "requests",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "completion_tokens_per_request": {
+      "value": 2000,
+      "unit": "tokens/request",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "completion_tokens_total": {
+      "value": 32000,
+      "unit": "tokens",
+      "kind": "derived",
+      "n": 16,
+      "same_condition": false
+    },
+    "prompt": "Write a continuous 300-word production-quality Python LRU cache implementation. Keep writing until the token limit.",
+    "temperature": {
+      "value": 0,
+      "unit": "dimensionless",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "seed": {
+      "value": 0,
+      "unit": "seed",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "ignore_eos": true,
+    "completion_policy": "exactly 2000 completion tokens per request"
+  },
+  "result": {
+    "aggregate_throughput": {
+      "value": 1425.721430518942,
+      "unit": "tok/s",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "makespan": {
+      "value": 22.444777300115675,
+      "unit": "s",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "tokens": {
+      "accepted": {
+        "value": 24987,
+        "unit": "tokens",
+        "kind": "measured",
+        "n": 1,
+        "same_condition": false
+      },
+      "draft": {
+        "value": 35060,
+        "unit": "tokens",
+        "kind": "measured",
+        "n": 1,
+        "same_condition": false
+      },
+      "sampled": {
+        "value": 7013,
+        "unit": "tokens",
+        "kind": "measured",
+        "n": 1,
+        "same_condition": false
+      }
+    },
+    "render_lag": {
+      "median": {
+        "value": 0.04182748651348114,
+        "unit": "s",
+        "kind": "measured",
+        "n": 16,
+        "same_condition": false
+      },
+      "range": {
+        "min": 0.0012483990285545588,
+        "max": 0.04265878605656326,
+        "unit": "s",
+        "kind": "measured",
+        "n": 16,
+        "same_condition": false
+      }
+    }
+  },
+  "validation": {
+    "valid": true,
+    "reasons": [],
+    "run_n": 1,
+    "same_condition_comparison": false,
+    "parallelhue_exact": false
+  },
+  "provenance": {
+    "artifact_labels": ["precursor-dspark8-renderer-custom-plugin"],
+    "source_trees": {
+      "vllm": "1e9c9c3475fa30ab48d5639f8882f1e93bb552bf",
+      "sparkinfer": "eec30ff294c1870b59a04686fff6608fddb62089"
+    },
+    "model_artifact": {
+      "immutable_revision_available": false,
+      "public_reproducibility": false,
+      "caveat": "Immutable model artifact revision unavailable; context-only precursor evidence with no public reproducibility claim."
+    },
+    "caveat": "Measured by a precursor dspark8 renderer/custom plugin; this predates ParallelHue exact and must not be called ParallelHue exact evidence."
+  }
+}

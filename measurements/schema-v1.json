@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ParallelHue measurement record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model",
+    "hardware",
+    "software",
+    "server",
+    "request",
+    "result",
+    "validation",
+    "provenance"
+  ],
+  "properties": {
+    "$schema": { "type": "string", "minLength": 1 },
+    "schema_version": { "const": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "hardware": { "$ref": "#/$defs/hardware" },
+    "software": { "$ref": "#/$defs/software" },
+    "server": { "$ref": "#/$defs/server" },
+    "request": { "$ref": "#/$defs/request" },
+    "result": { "$ref": "#/$defs/result" },
+    "validation": { "$ref": "#/$defs/validation" },
+    "provenance": { "$ref": "#/$defs/provenance" }
+  },
+  "$defs": {
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "unit", "kind", "n", "same_condition"],
+      "properties": {
+        "value": { "type": "number" },
+        "unit": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["measured", "derived", "condition"] },
+        "n": { "type": "integer", "minimum": 1 },
+        "same_condition": { "type": "boolean" }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu_model", "gpu_count"],
+      "properties": {
+        "gpu_model": { "type": "string", "minLength": 1 },
+        "gpu_count": { "$ref": "#/$defs/quantity" }
+      }
+    },
+    "software": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vllm_revision", "sparkinfer_revision"],
+      "properties": {
+        "vllm_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "sparkinfer_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tensor_parallel_size",
+        "max_model_len",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "block_size",
+        "prefix_cache",
+        "gpu_memory_utilization",
+        "cpu_kv_cache",
+        "gpu_kv_cache_dtype",
+        "offload",
+        "speculative"
+      ],
+      "properties": {
+        "tensor_parallel_size": { "$ref": "#/$defs/quantity" },
+        "max_model_len": { "$ref": "#/$defs/quantity" },
+        "max_num_seqs": { "$ref": "#/$defs/quantity" },
+        "max_num_batched_tokens": { "$ref": "#/$defs/quantity" },
+        "block_size": { "$ref": "#/$defs/quantity" },
+        "prefix_cache": { "type": "boolean" },
+        "gpu_memory_utilization": { "$ref": "#/$defs/quantity" },
+        "cpu_kv_cache": { "$ref": "#/$defs/quantity" },
+        "gpu_kv_cache_dtype": { "type": "string", "minLength": 1 },
+        "offload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "mode"],
+          "properties": {
+            "backend": { "type": "string", "minLength": 1 },
+            "mode": { "type": "string", "minLength": 1 }
+          }
+        },
+        "speculative": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "variant", "depth"],
+          "properties": {
+            "backend": { "type": "string", "minLength": 1 },
+            "variant": { "type": "string", "minLength": 1 },
+            "depth": { "$ref": "#/$defs/quantity" }
+          }
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "concurrency",
+        "completion_tokens_per_request",
+        "completion_tokens_total",
+        "prompt",
+        "temperature",
+        "seed",
+        "ignore_eos",
+        "completion_policy"
+      ],
+      "properties": {
+        "concurrency": { "$ref": "#/$defs/quantity" },
+        "completion_tokens_per_request": { "$ref": "#/$defs/quantity" },
+        "completion_tokens_total": { "$ref": "#/$defs/quantity" },
+        "prompt": { "type": "string", "minLength": 1 },
+        "temperature": { "$ref": "#/$defs/quantity" },
+        "seed": { "$ref": "#/$defs/quantity" },
+        "ignore_eos": { "type": "boolean" },
+        "completion_policy": { "type": "string", "minLength": 1 }
+      }
+    },
+    "token_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "draft", "sampled"],
+      "properties": {
+        "accepted": { "$ref": "#/$defs/quantity" },
+        "draft": { "$ref": "#/$defs/quantity" },
+        "sampled": { "$ref": "#/$defs/quantity" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aggregate_throughput", "makespan", "tokens", "render_lag"],
+      "properties": {
+        "aggregate_throughput": { "$ref": "#/$defs/quantity" },
+        "makespan": { "$ref": "#/$defs/quantity" },
+        "tokens": { "$ref": "#/$defs/token_counts" },
+        "render_lag": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["median", "range"],
+          "properties": {
+            "median": { "$ref": "#/$defs/quantity" },
+            "range": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["min", "max", "unit", "kind", "n", "same_condition"],
+              "properties": {
+                "min": { "type": "number" },
+                "max": { "type": "number" },
+                "unit": { "type": "string", "minLength": 1 },
+                "kind": { "enum": ["measured", "derived"] },
+                "n": { "type": "integer", "minimum": 1 },
+                "same_condition": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "reasons", "run_n", "same_condition_comparison", "parallelhue_exact"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "run_n": { "type": "integer", "minimum": 1 },
+        "same_condition_comparison": { "type": "boolean" },
+        "parallelhue_exact": { "type": "boolean" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_labels", "source_trees", "caveat"],
+      "properties": {
+        "artifact_labels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source_trees": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vllm", "sparkinfer"],
+          "properties": {
+            "vllm": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sparkinfer": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+          }
+        },
+        "model_artifact": { "$ref": "#/$defs/model_artifact" },
+
+        "caveat": { "type": "string", "minLength": 1 }
+      }
+    },
+    "model_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["immutable_revision_available", "public_reproducibility", "caveat"],
+      "properties": {
+        "immutable_revision_available": { "type": "boolean" },
+        "public_reproducibility": { "type": "boolean" },
+        "caveat": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

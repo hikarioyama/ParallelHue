@@ -1,0 +1,185 @@
+{
+  "$schema": "./compatibility-schema-v1.json",
+  "schema_version": 1,
+  "verdict": "PASS",
+  "model": {
+    "requested_identity": "Qwen/Qwen2.5-0.5B-Instruct",
+    "actual_identity": "Qwen/Qwen2.5-0.5B-Instruct",
+    "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+    "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+    "architecture": "Qwen2ForCausalLM",
+    "quantization": {
+      "method": "none"
+    }
+  },
+  "hardware": {
+    "gpu_index": {
+      "value": 1,
+      "unit": "index",
+      "kind": "observed",
+      "n": 1,
+      "same_condition": false
+    },
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Max-Q",
+    "gpu_count": {
+      "value": 1,
+      "unit": "GPU",
+      "kind": "condition",
+      "n": 1,
+      "same_condition": false
+    },
+    "vram": {
+      "value": 97887,
+      "unit": "MiB",
+      "kind": "observed",
+      "n": 1,
+      "same_condition": false
+    },
+    "driver": "595.71.05",
+    "driver_cuda": "13.2"
+  },
+  "software": {
+    "vllm": "0.26.0",
+    "vllm_mode": "V1",
+    "torch": "2.11.0+cu130",
+    "torch_cuda": "13.0",
+    "flashinfer_python": "0.6.14",
+    "flashinfer_cubin": "0.6.8.post1",
+    "parallelhue": "0.1.0"
+  },
+  "guardrails": {
+    "guarded": true,
+    "environment": {
+      "CUDA_VISIBLE_DEVICES": "1",
+      "VLLM_PLUGINS": "parallelhue",
+      "PARALLELHUE_VLLM_EXACT": "1",
+      "FLASHINFER_DISABLE_VERSION_CHECK": "1"
+    },
+    "resource_limits": {
+      "MemoryMax": "100G",
+      "MemorySwapMax": "0",
+      "TORCHINDUCTOR_COMPILE_THREADS": "6",
+      "MAX_JOBS": "6",
+      "NVCC_THREADS": "2"
+    },
+    "socket_mode": "0700"
+  },
+  "server_flags": [
+    "--served-model-name qwen2.5-0.5b",
+    "--host 127.0.0.1",
+    "--port 18080",
+    "--max-model-len 2048",
+    "--max-num-seqs 1",
+    "--gpu-memory-utilization 0.50",
+    "--enforce-eager",
+    "--attention-backend FLASH_ATTN"
+  ],
+  "launch_attempts": [
+    {
+      "backend": "FLASH_ATTN",
+      "label": "official vLLM 0.26.0 V1",
+      "exit_status": {
+        "value": 0,
+        "unit": "process exit status",
+        "kind": "observed",
+        "n": 1,
+        "same_condition": false
+      },
+      "health": true,
+      "blocker": null
+    }
+  ],
+  "validation": {
+    "exact": {
+      "status": "PASS",
+      "label": "[EXACT SCHEDULER STEP] max_tokens=32 CLI; independent max_tokens=16 capture",
+      "exit_status": {
+        "value": 0,
+        "unit": "process exit status",
+        "kind": "observed",
+        "n": 1,
+        "same_condition": false
+      },
+      "n": 1,
+      "same_condition": false,
+      "kind": "measured"
+    },
+    "fallback": {
+      "status": "PASS",
+      "label": "[SSE CHUNK MODE] max_tokens=16",
+      "exit_status": {
+        "value": 0,
+        "unit": "process exit status",
+        "kind": "observed",
+        "n": 1,
+        "same_condition": false
+      },
+      "n": 1,
+      "same_condition": false,
+      "kind": "measured"
+    },
+    "event_count": {
+      "value": 16,
+      "unit": "events",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "sequence_count": {
+      "value": 16,
+      "unit": "sequences",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "sequence_range": {
+      "min": 0,
+      "max": 15,
+      "unit": "sequence",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "step_id_count": {
+      "value": 16,
+      "unit": "step IDs",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "step_range": {
+      "min": 32,
+      "max": 47,
+      "unit": "step ID",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "color_slot_count": {
+      "value": 4,
+      "unit": "color slots",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "finished_count": {
+      "value": 1,
+      "unit": "finished events",
+      "kind": "measured",
+      "n": 1,
+      "same_condition": false
+    },
+    "terminal_completion": true,
+    "text_token_ids_byte_identical": true
+  },
+  "restoration": {
+    "restored": true,
+    "summary": "The named official vLLM test scope was stopped cleanly and its test GPU process released."
+  },
+  "provenance": {
+    "source": "official-vllm-0.26-live-capture",
+    "captured_at": "2026-08-04",
+    "sanitized": true,
+    "caveat": "Compatibility and exactness evidence only; n=1 for each validation run and no throughput claim."
+  }
+}

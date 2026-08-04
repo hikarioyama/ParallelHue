@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parallelhue"
+version = "0.1.0"
+description = "Truthful scheduler-step or SSE-chunk terminal coloring for local OpenAI-compatible streams"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "ParallelHue contributors"}]
+keywords = ["vllm", "streaming", "terminal"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.entry-points."vllm.general_plugins"]
+parallelhue = "parallelhue.vllm_plugin:register"
+
+[project.scripts]
+parallelhue = "parallelhue.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
