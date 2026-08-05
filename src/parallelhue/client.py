@@ -276,6 +276,13 @@ class ParallelHueClient:
             "stream": True,
             "return_token_ids": True,
             "request_id": request_id,
+            # dspark8 demo parity: deterministic continuous generation
+            "temperature": 0,
+            "seed": 0,
+            "stream_options": {"include_usage": True},
+            # Force full-length decode for c16 throughput demos (dspark8 uses these).
+            "ignore_eos": True,
+            "min_tokens": self.config.max_tokens,
         }
         if is_chat:
             payload["messages"] = [{"role": "user", "content": prompt}]

@@ -134,6 +134,12 @@ included in wheel or sdist artifacts:
   [intended client command](examples/gemma-3-12b-awq-rtx5070ti/run-parallelhue.example.sh).
   All four server attempts were blocked before health, so the client command
   was not executed.
+- [Qwen3.6-35B-A3B-NVFP4 + MTP recipe](examples/qwen36-35b-a3b-nvfp4/):
+  [server launcher](examples/qwen36-35b-a3b-nvfp4/launch-server.sh) and
+  [c16 client](examples/qwen36-35b-a3b-nvfp4/run-c16.sh). Uses the shared
+  viewer with `--backend mtp`; model/path defaults are `$HOME/...` and
+  overridable by env.
+
 
 ## Validation
 
@@ -144,6 +150,13 @@ exact-mode capture linked above is a positive compatibility observation
 vLLM 0.26.x hook contract.
 
 ## Architecture and security boundary
+
+ParallelHue is a **shared viewer** plus **swappable inference recipes**:
+the tmux/color/summary UX stays common, while speculative-decoding metric
+profiles live under `src/parallelhue/backends/` (`generic` / `mtp` /
+`dspark`) and per-model launch/run scripts live under `examples/`. Plug a
+backend in; do not fork the viewer for each engine.
+
 
 Each client run generates a 32-character lowercase hexadecimal `run_id` and
 request IDs of the form `ph1_<run_id>_<stream index>`. The exact transport is a
