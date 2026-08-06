@@ -27,4 +27,5 @@ PROFILE = MTPBackendProfile(
     accepted_counters=("vllm:spec_decode_num_accepted_tokens_total",),
     draft_counters=("vllm:spec_decode_num_draft_tokens_total",),
     drafts_counters=("vllm:spec_decode_num_drafts_total",),
+    uses_speculative_decoding=True,
 )

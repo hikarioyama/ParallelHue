@@ -10,6 +10,9 @@ GPU_DEVICE_REQUEST="\"device=${GPU_DEVICES}\""
 STOP_TIMEOUT="${STOP_TIMEOUT:-30}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.975}"
 CPU_KV_CACHE_GIB="${CPU_KV_CACHE_GIB:-48.5}"
+# C16 default; for C32: MAX_NUM_SEQS=32 MAX_NUM_BATCHED_TOKENS=8192
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 
 if [[ "${1:-launch}" == "stop" ]]; then
   if container_id="$(docker container ls -a --filter "name=^/${CONTAINER_NAME}$" --quiet)"; then
@@ -69,8 +72,8 @@ vllm_args=(
   --served-model-name "${SERVED_MODEL_NAME}"
   --tensor-parallel-size 2
   --max-model-len 524288
-  --max-num-seqs 16
-  --max-num-batched-tokens 4096
+  --max-num-seqs "${MAX_NUM_SEQS}"
+  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}"
   --block-size 256
   --enable-prefix-caching
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"

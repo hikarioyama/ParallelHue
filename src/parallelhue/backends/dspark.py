@@ -36,4 +36,5 @@ PROFILE = DSparkBackendProfile(
         "dspark:spec_decode_num_drafts_total",
         "vllm:spec_decode_num_drafts_total",
     ),
+    uses_speculative_decoding=True,
 )

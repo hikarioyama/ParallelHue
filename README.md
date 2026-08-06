@@ -17,6 +17,12 @@ and gaps visible. The colors are not decorative and do not assert a global
 scheduler iteration shared across streams; they are a causal view of the
 events the telemetry actually proves.
 
+Color is only used when the selected backend profile actually runs speculative
+decoding (`mtp`, `dspark`). Ordinary non-speculative backends (`generic`, and
+`auto` when it resolves there) stay monochrome: without draft/accept structure
+there is nothing for the palette to encode. `NO_COLOR` still forces monochrome
+for every backend.
+
 That distinction is why the client keeps an explicit semantic boundary between
 `exact` and SSE `chunk` mode. Exact colors are emitted only after scheduler
 telemetry, token IDs, sequence, and raw text reconcile; chunk colors describe

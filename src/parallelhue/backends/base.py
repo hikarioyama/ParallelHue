@@ -10,6 +10,10 @@ class BackendProfile:
 
     Counter tuples are ordered by preference.  A profile may leave any of the
     speculative-decoding tuples empty when that backend does not expose it.
+
+    ``uses_speculative_decoding`` gates stream coloring: ParallelHue only
+    paints step/chunk colors when the serving path actually uses speculative
+    decoding (MTP, DSpark, …). Ordinary decode stays monochrome.
     """
 
     name: str
@@ -17,6 +21,7 @@ class BackendProfile:
     accepted_counters: tuple[str, ...]
     draft_counters: tuple[str, ...]
     drafts_counters: tuple[str, ...]
+    uses_speculative_decoding: bool = False
 
     def extra_summary_lines(
         self,

@@ -2,7 +2,8 @@
 
 The client deliberately treats scheduler telemetry as optional.  Only the exact
 mode is allowed to claim scheduler-step coloring; ordinary SSE chunks are always
-labeled as such.
+labeled as such. Stream colors are further gated: without a speculative-decoding
+backend (MTP/DSpark/…), text stays monochrome even in exact/chunk modes.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping, Sequence
 
+from .backends import get_backend
 from .protocol import StepEvent, decode_event, parse_request_id
 from .render import StepReconciler, colorize, sanitize_terminal
 
@@ -42,6 +44,7 @@ class ClientConfig:
     concurrency: int = 1
     api_key: str | None = None
     mode: str = "auto"
+    backend: str = "auto"
     socket_dir: str | None = None
     timeout: float = 60.0
     stream_interval: int = 1
@@ -266,24 +269,72 @@ class ParallelHueClient:
     def __init__(self, config: ClientConfig | None = None, opener: Any = urllib.request.urlopen):
         self.config = config or ClientConfig()
         self._opener = opener
+        self._backend = get_backend(self.config.backend, self.config.model)
+        # Colors encode speculative contribution. Non-spec backends stay plain.
+        self._color_enabled = bool(self._backend.uses_speculative_decoding)
+
+    def _paint(self, text: str, *, step_id: int | None = None, color: int | None = None) -> tuple[str, int | None]:
+        """Return display text and palette color; monochrome when non-speculative.
+
+        Also monochrome when ``NO_COLOR`` is set (https://no-color.org/).
+        """
+        if not text:
+            return "", None
+        if (not self._color_enabled) or os.environ.get("NO_COLOR", ""):
+            return text, None
+        if step_id is not None:
+            return colorize(text, step_id=step_id), PALETTE[step_id % len(PALETTE)]
+        selected = color if color is not None else PALETTE[0]
+        return colorize(text, selected), selected
 
     def _request(self, prompt: str, request_id: str) -> Any:
         endpoint = self.config.endpoint.rstrip("/")
         is_chat = endpoint.endswith("/chat/completions")
+        # Prefer live parallel viewing over forced full-length degeneration.
+        # Opt into the old dspark8 continuous-fill behavior with
+        # PARALLELHUE_FORCE_FULL_LENGTH=1.
+        force_full = bool(os.environ.get("PARALLELHUE_FORCE_FULL_LENGTH", "").strip())
+        try:
+            stream_index = int(str(request_id).rsplit("_", 1)[-1])
+        except ValueError:
+            stream_index = 0
+        temperature = float(os.environ.get("PARALLELHUE_TEMPERATURE", "0.8" if not force_full else "0"))
         payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "return_token_ids": True,
             "request_id": request_id,
-            # dspark8 demo parity: deterministic continuous generation
-            "temperature": 0,
-            "seed": 0,
+            "temperature": temperature,
+            # Distinct seeds so concurrent panes diverge under sampling.
+            "seed": stream_index,
             "stream_options": {"include_usage": True},
-            # Force full-length decode for c16 throughput demos (dspark8 uses these).
-            "ignore_eos": True,
-            "min_tokens": self.config.max_tokens,
         }
+        # Optional sampling knobs. Unset = omit from payload (backend default).
+        # Maple TQ2 high-concurrency runs may set:
+        #   PARALLELHUE_FREQUENCY_PENALTY=0.3
+        #   PARALLELHUE_REPEAT_PENALTY=1.2
+        def _env_float(name: str) -> float | None:
+            raw = os.environ.get(name)
+            if raw is None:
+                return None
+            raw = raw.strip()
+            if raw == "":
+                return None
+            return float(raw)
+
+        frequency_penalty = _env_float("PARALLELHUE_FREQUENCY_PENALTY")
+        presence_penalty = _env_float("PARALLELHUE_PRESENCE_PENALTY")
+        repeat_penalty = _env_float("PARALLELHUE_REPEAT_PENALTY")
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
+        if force_full:
+            payload["ignore_eos"] = True
+            payload["min_tokens"] = self.config.max_tokens
         if is_chat:
             payload["messages"] = [{"role": "user", "content": prompt}]
         else:
@@ -379,10 +430,11 @@ class ParallelHueClient:
                     terminal_matched = terminal_matched or any(event.finished for event in events)
                     for event in events:
                         safe = sanitize_terminal(event.text)
+                        painted, color = self._paint(safe, step_id=event.step_id)
                         yield StreamChunk(
-                            request_id, sequence, colorize(safe, step_id=event.step_id) if safe else "",
+                            request_id, sequence, painted,
                             tuple(event.token_ids), event.finished, "EXACT SCHEDULER STEP",
-                            PALETTE[event.step_id % len(PALETTE)], event.step_id, event.text,
+                            color, event.step_id, event.text,
                         )
                         sequence += 1
                 elif result is not None and not auto_downgraded:
@@ -390,17 +442,19 @@ class ParallelHueClient:
                     terminal_matched = terminal_matched or any(event.finished for event in events)
                     for event in events:
                         safe = sanitize_terminal(event.text)
+                        painted, color = self._paint(safe, step_id=event.step_id)
                         yield StreamChunk(
-                            request_id, sequence, colorize(safe, step_id=event.step_id) if safe else "",
+                            request_id, sequence, painted,
                             tuple(event.token_ids), event.finished, "EXACT SCHEDULER STEP",
-                            PALETTE[event.step_id % len(PALETTE)], event.step_id, event.text,
+                            color, event.step_id, event.text,
                         )
                         sequence += 1
                 else:
                     safe = sanitize_terminal(raw_text)
+                    painted, color = self._paint(safe, color=PALETTE[sequence % len(PALETTE)])
                     yield StreamChunk(
-                        request_id, sequence, colorize(safe, PALETTE[sequence % len(PALETTE)]) if safe else "",
-                        tuple(token_ids), finished, "SSE CHUNK MODE", PALETTE[sequence % len(PALETTE)], None, raw_text,
+                        request_id, sequence, painted,
+                        tuple(token_ids), finished, "SSE CHUNK MODE", color, None, raw_text,
                     )
                     sequence += 1
             if self.config.mode == "exact" and (

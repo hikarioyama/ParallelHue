@@ -3,6 +3,7 @@
 # Usage:
 #   ./launch-server.sh          # baseline
 #   ./launch-server.sh mtp      # MTP speculative (num_speculative_tokens=3)
+#   MAX_NUM_SEQS=32 ./launch-server.sh mtp   # C32 capacity (default remains 16)
 #   ./launch-server.sh stop
 set -euo pipefail
 
@@ -17,7 +18,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 SOCKET_DIR="${PARALLELHUE_SOCKET_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/parallelhue}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-$MODEL_DIR/chat_template.jinja}"
 
-# C16 demo defaults (tweet parity scale)
+# Demo defaults (tweet parity = C16). Override for C32 without editing this file:
+#   MAX_NUM_SEQS=32 MAX_NUM_BATCHED_TOKENS=8192 ./launch-server.sh mtp
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"

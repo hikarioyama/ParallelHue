@@ -49,6 +49,23 @@ def test_chunk_mode_posts_openai_compatible_request():
     assert seen["request"].get_header("Authorization") == "Bearer secret"
     assert items[0].token_ids == (17,)
     assert items[0].mode == "SSE CHUNK MODE"
+    # Non-speculative backends stay monochrome.
+    assert items[0].color is None
+    assert "\x1b" not in items[0].text
+
+
+def test_chunk_mode_colors_only_for_speculative_backend(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    def opener(request, timeout):
+        return FakeResponse([{"choices": [{"delta": {"content": "hello", "token_ids": [17]}}]}])
+
+    mono = list(ParallelHueClient(ClientConfig(prompt="hi", mode="chunk", backend="generic"), opener=opener).stream())
+    colored = list(ParallelHueClient(ClientConfig(prompt="hi", mode="chunk", backend="mtp"), opener=opener).stream())
+    assert mono[0].color is None
+    assert "\x1b" not in mono[0].text
+    assert colored[0].color == 46
+    assert "\x1b[38;5;46m" in colored[0].text
 
 
 def test_reasoning_and_content_delta_fields_render_in_order():
@@ -142,7 +159,9 @@ def test_metadata_frames_do_not_require_telemetry(tmp_path):
     assert items[0].mode == "SSE CHUNK MODE"
 
 
-def test_exact_coalesced_events_emit_one_color_per_step(tmp_path):
+def test_exact_coalesced_events_emit_one_color_per_step(tmp_path, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
     def opener(request, timeout):
         request_id = json.loads(request.data)["request_id"]
         run_id = request_id.split("_")[1]
@@ -157,13 +176,35 @@ def test_exact_coalesced_events_emit_one_color_per_step(tmp_path):
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
         ])
 
-    config = ClientConfig(prompt="hi", mode="exact", socket_dir=str(tmp_path))
+    config = ClientConfig(prompt="hi", mode="exact", backend="mtp", socket_dir=str(tmp_path))
     items = list(ParallelHueClient(config, opener=opener).stream())
     assert [item.raw_text for item in items] == ["a", "b"]
     assert [item.step_id for item in items] == [0, 1]
     assert all(item.mode == "EXACT SCHEDULER STEP" for item in items)
     assert "\x1b[38;5;46m" in items[0].text
     assert "\x1b[38;5;196m" in items[1].text
+
+def test_exact_mode_stays_monochrome_without_speculative_backend(tmp_path):
+    def opener(request, timeout):
+        request_id = json.loads(request.data)["request_id"]
+        run_id = request_id.split("_")[1]
+        path = str(tmp_path / f"{run_id}.sock")
+        sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sender.sendto(encode_event(StepEvent(1, run_id, request_id, 0, 0, 0, (3,), "a", False)), path)
+        sender.sendto(encode_event(StepEvent(1, run_id, request_id, 1, 1, 0, (4,), "b", True)), path)
+        sender.close()
+        return FakeResponse([
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"content": "ab", "token_ids": [3, 4]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ])
+
+    config = ClientConfig(prompt="hi", mode="exact", backend="generic", socket_dir=str(tmp_path))
+    items = list(ParallelHueClient(config, opener=opener).stream())
+    assert [item.raw_text for item in items] == ["a", "b"]
+    assert all(item.mode == "EXACT SCHEDULER STEP" for item in items)
+    assert all(item.color is None for item in items)
+    assert all("\x1b" not in item.text for item in items)
 
 
 def test_http_error_is_terminal_sanitized():

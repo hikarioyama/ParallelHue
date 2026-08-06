@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Usage:
+#   ./run-parallelhue.example.sh
+#   CONCURRENCY=32 TMUX_FLAG=1 ./run-parallelhue.example.sh
+
 set -euo pipefail
 
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1/chat/completions}"

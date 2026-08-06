@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# C16 ParallelHue client for the local 35B-A3B NVFP4 server.
+# ParallelHue client for the local 35B-A3B NVFP4 server.
 # Same operation as the tweet / dspark8 demo:
-#   one command → tmux session with 16 panes → auto-attach → live colored streams
+#   one command → tmux session with N panes → auto-attach → live colored streams
 #
 # Usage (from a normal terminal, NOT already deep inside a tiny pane):
 #   ./run-c16.sh
-#   MODE=exact ./run-c16.sh
-#   MAX_TOKENS=2000 ./run-c16.sh
+#   CONCURRENCY=32 ./run-c16.sh          # C32 (server must allow max-num-seqs>=32)
+#   MODE=exact MAX_TOKENS=2000 ./run-c16.sh
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)

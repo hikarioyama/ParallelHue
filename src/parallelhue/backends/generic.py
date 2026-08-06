@@ -15,8 +15,11 @@ PROFILE = GenericBackendProfile(
         "vllm:generation_tokens",
         "generation_tokens_total",
         "vllm:request_generation_tokens_sum",
+        # llama.cpp / llama-server --metrics
+        "llamacpp:tokens_predicted_total",
     ),
     accepted_counters=(),
     draft_counters=(),
     drafts_counters=(),
+    uses_speculative_decoding=False,
 )

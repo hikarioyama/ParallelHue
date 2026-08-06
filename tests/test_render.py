@@ -101,11 +101,23 @@ def test_sanitization_strips_ansi_bidi_and_controls():
     assert "\x1b" not in sanitize_terminal(unsafe)
 
 
-def test_palette_cycles_and_colorize_sanitizes_model_text():
+def test_palette_cycles_and_colorize_sanitizes_model_text(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     assert [palette_color(i) for i in range(6)] == [*PALETTE, PALETTE[0], PALETTE[1]]
     rendered = colorize("x\x1b[2J", step_id=4)
     assert rendered == "\x1b[38;5;46mx\x1b[0m"
 
+
+def test_colorize_respects_no_color(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert colorize("x\x1b[2J", step_id=4) == "x"
+    assert "\x1b" not in colorize("plain", color=196)
+
+
+def test_colorize_still_colors_when_no_color_empty(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "")
+    rendered = colorize("hi", step_id=0)
+    assert rendered == "\x1b[38;5;46mhi\x1b[0m"
 
 def test_render_queue_overflow_is_nonblocking_and_fail_closed():
     queue = RenderQueue(maxsize=1)

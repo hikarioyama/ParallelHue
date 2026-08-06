@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import os
 import re
 from threading import Lock
 from typing import Generic, Iterable, TypeVar
@@ -57,7 +58,14 @@ def palette_color(step_id: int) -> int:
 
 
 def colorize(text: str, color: int | None = None, *, step_id: int | None = None) -> str:
-    """Sanitize and wrap text in an xterm-256 foreground color."""
+    """Sanitize and wrap text in an xterm-256 foreground color.
+
+    When ``NO_COLOR`` is set to any non-empty value, return sanitized plain text
+    with no ANSI color wrapper (https://no-color.org/).
+    """
+    safe = sanitize_terminal(text)
+    if os.environ.get("NO_COLOR", ""):
+        return safe
     if step_id is not None:
         selected = palette_color(step_id)
     elif color is None:
@@ -68,7 +76,6 @@ def colorize(text: str, color: int | None = None, *, step_id: int | None = None)
         selected = palette_color(color)
     else:
         raise ValueError("color must be a palette color or non-negative index")
-    safe = sanitize_terminal(text)
     return f"\x1b[38;5;{selected}m{safe}\x1b[0m"
 
 

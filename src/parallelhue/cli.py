@@ -203,8 +203,7 @@ def run_summary(args: argparse.Namespace) -> int:
         print(f"spec drafts: {drafts_text}", flush=True)
         print(f"spec accept rate: {accept_rate:.2f}%" if accept_rate is not None else "spec accept rate: unavailable", flush=True)
     print("Press Esc in this summary pane to close the tmux session.", flush=True)
-    # dspark8 parity: flip the attached client onto the summary window
-    # once decode finishes, so the result screen is visible without manual switch.
+    # ParallelHue default: flip to summary when decode finishes.
     subprocess.run(
         [tmux, "select-window", "-t", f"{args.session}:summary"],
         check=False,
@@ -268,6 +267,8 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
         "--no-tmux",
         "--mode",
         args.mode,
+        "--backend",
+        args.backend,
         "--endpoint",
         args.endpoint,
         "--model",
@@ -287,12 +288,34 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
 
     def command(worker_index: int) -> str:
         # tmux split-window does not use a shell; wrap so env exports work.
-        inner = shlex.join([*base, "--worker-index", str(worker_index)])
+        env_pairs = [
+            f"PARALLELHUE_TOTAL={n}",
+            f"PARALLELHUE_INDEX={worker_index}",
+        ]
+        # Honor parent NO_COLOR so pane workers stay monochrome too.
+        no_color = os.environ.get("NO_COLOR")
+        if no_color:
+            env_pairs.append(f"NO_COLOR={no_color}")
+        # Attach countdown before generation starts from token 0.
+        start_delay = os.environ.get("PARALLELHUE_START_DELAY")
+        if start_delay:
+            env_pairs.append(f"PARALLELHUE_START_DELAY={start_delay}")
+        # Sampling knobs used by ParallelHueClient._request. tmux panes do not
+        # inherit the launcher shell env reliably, so copy them explicitly.
+        for name in (
+            "PARALLELHUE_TEMPERATURE",
+            "PARALLELHUE_FREQUENCY_PENALTY",
+            "PARALLELHUE_PRESENCE_PENALTY",
+            "PARALLELHUE_REPEAT_PENALTY",
+            "PARALLELHUE_FORCE_FULL_LENGTH",
+        ):
+            value = os.environ.get(name)
+            if value is not None and value != "":
+                env_pairs.append(f"{name}={value}")
         return shlex.join(
             [
                 "env",
-                f"PARALLELHUE_TOTAL={n}",
-                f"PARALLELHUE_INDEX={worker_index}",
+                *env_pairs,
                 *base,
                 "--worker-index",
                 str(worker_index),
@@ -506,6 +529,7 @@ def run_worker(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
         api_key=args.api_key,
         mode=args.mode,
+        backend=args.backend,
         socket_dir=args.socket_dir,
         timeout=args.timeout,
     )
@@ -519,6 +543,27 @@ def run_worker(args: argparse.Namespace) -> int:
             print(f"[{worker_index + 1}/{total}]", flush=True)
         else:
             print(f"[{worker_index + 1}]", flush=True)
+
+    # Optional attach window before generation starts from token 0.
+    # Set PARALLELHUE_START_DELAY=seconds (e.g. 15) when launching.
+    delay_raw = os.environ.get("PARALLELHUE_START_DELAY", "").strip()
+    if delay_raw:
+        try:
+            delay = max(0.0, float(delay_raw))
+        except ValueError:
+            delay = 0.0
+        if delay > 0:
+            print(f"[waiting {delay:.0f}s — attach now]", flush=True)
+            print("generation starts from 0 after countdown; stops at max_tokens", flush=True)
+            end = time.time() + delay
+            while True:
+                left = end - time.time()
+                if left <= 0:
+                    break
+                print(f"\rstarting in {left:4.1f}s   ", end="", flush=True)
+                time.sleep(0.1)
+            print("\n[START]", flush=True)
+
     streams = (
         client.stream_many([prompt] * args.concurrency)
         if args.concurrency > 1
