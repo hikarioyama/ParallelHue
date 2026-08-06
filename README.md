@@ -145,6 +145,12 @@ included in wheel or sdist artifacts:
   [c16 client](examples/qwen36-35b-a3b-nvfp4/run-c16.sh). Uses the shared
   viewer with `--backend mtp`; model/path defaults are `$HOME/...` and
   overridable by env.
+- [Maple-Preview TQ2 chunk recipe](examples/maple-preview-tq2/README.md):
+  [server launcher](examples/maple-preview-tq2/launch-server.sh),
+  [c8 client](examples/maple-preview-tq2/run-c8.sh), and
+  [c16 client](examples/maple-preview-tq2/run-c16.sh). llama.cpp metrics +
+  generic monochrome rendering; `MODEL_PATH` is required and no host-local
+  model path is embedded.
 
 
 ## Validation
