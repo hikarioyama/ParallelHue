@@ -145,6 +145,11 @@ included in wheel or sdist artifacts:
   [c16 client](examples/qwen36-35b-a3b-nvfp4/run-c16.sh). Uses the shared
   viewer with `--backend mtp`; model/path defaults are `$HOME/...` and
   overridable by env.
+- [Nemotron 3.5 Lightning 30B-A3B NVFP4 + DSpark](examples/nemotron35-lightning-30b-a3b-nvfp4-dspark/):
+  [server launcher](examples/nemotron35-lightning-30b-a3b-nvfp4-dspark/launch-server.sh) and
+  [c16 client](examples/nemotron35-lightning-30b-a3b-nvfp4-dspark/run-c16.sh). Native vLLM on
+  GPU1 with external NVIDIA DSpark draft + KV FP8; viewer uses `--backend dspark`
+  in chunk mode.
 - [Maple-Preview TQ2 chunk recipe](examples/maple-preview-tq2/README.md):
   [server launcher](examples/maple-preview-tq2/launch-server.sh),
   [c8 client](examples/maple-preview-tq2/run-c8.sh), and
