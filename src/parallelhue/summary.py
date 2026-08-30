@@ -11,8 +11,25 @@ import termios
 import time
 import tty
 
-from .backends import get_backend
-from .metrics import _counter_delta, _fetch_metrics, _parse_prometheus_counters
+def stream_rate_stats(
+    generation: int | None,
+    makespan: float,
+    concurrency: int,
+) -> tuple[float | None, float | None, float | None]:
+    """Return (aggregate_tok_s, mean_stream_tok_s, mean_tokens).
+
+    aggregate_tok_s combines all streams over wall makespan; mean_stream_tok_s
+    is that aggregate average divided across the concurrent streams (the
+    per-stream mean). mean_tokens is the average token count per stream.
+    A value is None when it is not computable: aggregate requires generation
+    and makespan > 0; mean_stream_tok_s additionally requires concurrency >= 1;
+    mean_tokens requires generation and concurrency >= 1.
+    """
+    concurrency = max(1, int(concurrency))
+    rate = generation / makespan if generation is not None and makespan > 0 else None
+    mean_rate = rate / concurrency if rate is not None and concurrency >= 1 else None
+    mean_tokens = generation / concurrency if generation is not None else None
+    return rate, mean_rate, mean_tokens
 
 
 def _decode_panes_running(tmux: str, session: str) -> bool:
@@ -80,14 +97,17 @@ def run_summary(args: argparse.Namespace) -> int:
     makespan = max(0.0, time.time() - started)
     profile = get_backend(args.backend, args.model)
     generation = _counter_delta(before, after, *profile.generation_counters) if baseline_available else None
-    rate = generation / makespan if generation is not None and makespan > 0 else None
-    count = "unavailable" if generation is None else f"{generation:,.0f}"
+    rate, mean_rate, mean_tokens = stream_rate_stats(generation, makespan, args.concurrency)
+    concurrency = max(1, int(args.concurrency))
+    mean_text = "unavailable" if mean_tokens is None else f"{mean_tokens:.1f}"
+    mean_rate_text = "unavailable" if mean_rate is None else f"{mean_rate:.2f}"
     print("\nParallelHue summary", flush=True)
     if timed_out:
         print("decode wait: timed out; reporting current metrics", flush=True)
     print(f"aggregate generation tok/s: {rate:.2f}" if rate is not None else "aggregate generation tok/s: unavailable", flush=True)
-    print(f"total generation/completion tokens: {count}", flush=True)
-    print(f"concurrency: {max(1, int(args.concurrency))}", flush=True)
+    print(f"mean generation tok/s: {mean_rate_text}", flush=True)
+    print(f"mean generation/completion tokens: {mean_text}", flush=True)
+    print(f"concurrency: {concurrency}", flush=True)
     print(f"wall makespan: {makespan:.2f}s", flush=True)
     print(f"backend profile: {profile.name}", flush=True)
     for line in profile.extra_summary_lines(before, after, makespan):
