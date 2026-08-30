@@ -19,6 +19,7 @@ from .metrics import _counter_delta, _metrics_url as _metrics_url_impl, _parse_p
 from .render import sanitize_terminal
 from . import summary as _summary
 from . import tmux_launch as _tmux_launch
+from .prompts import PromptFileError, load_prompt_file
 
 _summary_decode_panes_running = _summary._decode_panes_running
 
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=os.environ.get("PARALLELHUE_MODEL", ""))
     parser.add_argument("--backend", choices=("auto", "generic", "mtp", "dspark"), default=os.environ.get("PARALLELHUE_BACKEND", "auto"), help="metrics backend profile (default: PARALLELHUE_BACKEND or auto)")
     parser.add_argument("--prompt", dest="prompt", default=os.environ.get("PARALLELHUE_PROMPT", ""))
+    parser.add_argument("--prompt-file", default=os.environ.get("PARALLELHUE_PROMPT_FILE"), help="JSON array of prompts, one per stream (overrides --prompt)")
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("PARALLELHUE_MAX_TOKENS", "128")))
     parser.add_argument("--concurrency", type=int, default=int(os.environ.get("PARALLELHUE_CONCURRENCY", "1")))
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY") or os.environ.get("PARALLELHUE_API_KEY"))
@@ -96,15 +98,33 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
 
 
 def run_worker(args: argparse.Namespace) -> int:
-    prompt = args.prompt or args.prompt_arg
-    if not prompt:
-        raise SystemExit("parallelhue: a prompt is required (use --prompt or a positional prompt)")
+    worker_index = 0 if args.worker_index is None else int(args.worker_index)
+    stream_prompts: list[str] | None = None
+    if args.prompt_file:
+        try:
+            file_prompts = load_prompt_file(args.prompt_file)
+        except PromptFileError as exc:
+            print(f"parallelhue: {exc}", file=sys.stderr)
+            raise SystemExit(64) from exc
+        if args.concurrency > 1:
+            stream_prompts = [file_prompts[i % len(file_prompts)] for i in range(args.concurrency)]
+            prompt = stream_prompts[0]
+        else:
+            # One pane per stream (tmux path): pick by worker index so each
+            # pane runs a distinct prompt, cycling when there are more panes
+            # than prompts.
+            prompt = file_prompts[worker_index % len(file_prompts)]
+    else:
+        prompt = args.prompt or args.prompt_arg
+        if not prompt:
+            raise SystemExit("parallelhue: a prompt is required (use --prompt or a positional prompt)")
+        if args.concurrency > 1:
+            stream_prompts = [prompt] * args.concurrency
     config = ClientConfig(endpoint=args.endpoint, model=args.model, prompt=prompt, max_tokens=args.max_tokens,
                           concurrency=args.concurrency, api_key=args.api_key, mode=args.mode,
                           backend=args.backend, socket_dir=args.socket_dir, timeout=args.timeout)
     client = ParallelHueClient(config)
     printed_label: str | None = None
-    worker_index = 0 if args.worker_index is None else int(args.worker_index)
     if args.concurrency == 1 and args.worker_index is not None:
         total = os.environ.get("PARALLELHUE_TOTAL")
         print(f"[{worker_index + 1}/{total}]" if total and total.isdigit() else f"[{worker_index + 1}]", flush=True)
@@ -120,7 +140,7 @@ def run_worker(args: argparse.Namespace) -> int:
                 print(f"\rstarting in {left:4.1f}s   ", end="", flush=True)
                 time.sleep(0.1)
             print("\n[START]", flush=True)
-    streams = client.stream_many([prompt] * args.concurrency) if args.concurrency > 1 else client.stream(prompt, stream_index=worker_index)
+    streams = client.stream_many(stream_prompts) if stream_prompts is not None else client.stream(prompt, stream_index=worker_index)
     for item in streams:
         if item.mode != printed_label:
             print(f"[{item.mode}]", file=sys.stderr)

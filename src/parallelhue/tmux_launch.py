@@ -28,11 +28,13 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
     base = [sys.executable, "-m", "parallelhue", "--no-tmux", "--mode", args.mode,
             "--backend", args.backend, "--endpoint", args.endpoint, "--model", args.model,
             "--max-tokens", str(args.max_tokens), "--concurrency", "1", "--timeout", str(args.timeout)]
-    if args.socket_dir:
-        base += ["--socket-dir", args.socket_dir]
-    prompt = args.prompt or args.prompt_arg
-    if prompt:
-        base += ["--prompt", prompt]
+    if getattr(args, "prompt_file", None):
+        # Every pane selects its own prompt from the file via --worker-index.
+        base += ["--prompt-file", args.prompt_file]
+    else:
+        prompt = args.prompt or args.prompt_arg
+        if prompt:
+            base += ["--prompt", prompt]
 
     def command(worker_index: int) -> str:
         env_pairs = [f"PARALLELHUE_TOTAL={n}", f"PARALLELHUE_INDEX={worker_index}"]

@@ -261,3 +261,77 @@ def test_main_sanitizes_client_error(monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_worker", fail)
     assert cli.main(["hello"]) == 2
     assert "\x1b" not in capsys.readouterr().err
+
+def test_worker_cycles_prompt_file_for_concurrent_streams(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            calls["config_prompt"] = config.prompt
+
+        def stream_many(self, prompts):
+            calls["prompts"] = list(prompts)
+            yield StreamChunk("ph1_" + "a" * 32 + "_0", 0, "safe", mode="SSE CHUNK MODE")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
+    monkeypatch.setattr(cli, "ParallelHueClient", FakeClient)
+    args = cli.build_parser().parse_args(["--mode", "chunk", "--concurrency", "3", "--prompt-file", str(prompt_file)])
+    assert cli.run_worker(args) == 0
+    assert calls["config_prompt"] == "alpha"
+    assert calls["prompts"] == ["alpha", "beta", "alpha"]
+
+
+def test_worker_picks_prompt_by_worker_index(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            calls["config_prompt"] = config.prompt
+
+        def stream(self, prompt, stream_index=0):
+            calls["prompt"] = prompt
+            calls["stream_index"] = stream_index
+            yield StreamChunk("ph1_" + "a" * 32 + "_0", 0, "safe", mode="SSE CHUNK MODE")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
+    monkeypatch.setattr(cli, "ParallelHueClient", FakeClient)
+    args = cli.build_parser().parse_args(["--mode", "chunk", "--prompt-file", str(prompt_file), "--worker-index", "3"])
+    assert cli.run_worker(args) == 0
+    assert calls["config_prompt"] == "beta"
+    assert calls["prompt"] == "beta"
+    assert calls["stream_index"] == 3
+
+
+def test_worker_rejects_empty_prompt_file(monkeypatch, tmp_path, capsys):
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text("[]", encoding="utf-8")
+    args = cli.build_parser().parse_args(["--prompt-file", str(prompt_file)])
+    with pytest.raises(SystemExit) as exc:
+        cli.run_worker(args)
+    assert exc.value.code == 64
+    assert "must contain at least one prompt string" in capsys.readouterr().err
+
+
+def test_tmux_propagates_prompt_file_without_prompt(monkeypatch, tmp_path):
+    calls = []
+
+    class FixedUUID:
+        hex = "0123456789abcdef"
+
+    def fake_run(command, check=True, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha"]', encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
+    monkeypatch.setattr(cli.uuid, "uuid4", lambda: FixedUUID())
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    args = cli.build_parser().parse_args(["--tmux", "--concurrency", "2", "--prompt-file", str(prompt_file)])
+    assert cli.launch_tmux(args, "parallelhue") == 0
+    respawn = [command for command in calls if command[1] == "respawn-pane"]
+    worker_cmd = shlex.split(respawn[0][-1])
+    assert "--prompt-file" in worker_cmd and str(prompt_file) in worker_cmd
+    assert "--prompt" not in worker_cmd
