@@ -27,16 +27,21 @@ bash examples/deepseek-v4-flash-0731/launch-server.example.sh
 ## C16 / 2000-token workload template
 
 The ParallelHue example defaults to `--mode chunk`, C16, and 2000 completion
-tokens. It uses this exact prompt:
-
-```text
-Write a continuous 300-word production-quality Python LRU cache implementation. Keep writing until the token limit.
-```
+tokens. It assigns one distinct prompt to each stream by taking the first 16
+entries, in order, from the shared
+[`prompts.json`](../glm-5.3-flash-2x-rtxpro6000/prompts.json) bank. For a
+different workload, pass `--prompt-file /path/to/prompts.json` or set
+`PARALLELHUE_PROMPT_FILE`; the bank must contain at least 16 non-empty,
+exact-distinct prompts. Insufficient or duplicate banks are rejected rather
+than cycled.
 
 ```sh
 CONCURRENCY=16 MAX_TOKENS=2000 MODE=chunk \
   bash examples/deepseek-v4-flash-0731/run-parallelhue.example.sh
 ```
+
+ParallelHue's global rule is one distinct prompt per parallel stream. A direct
+`--prompt` is for C1 only; C>1 must use a sufficient prompt file.
 
 For a direct OpenAI-compatible request, preserve the dataset workload controls:
 
@@ -55,8 +60,8 @@ client-side concurrency harness if reproducing C16 outside ParallelHue.
 ## Exact-mode boundary and provenance
 
 Do not select `MODE=exact` or `MODE=auto` for this profile. ParallelHue exact
-v0.1 supports only the official vLLM 0.26.x private telemetry contract, while
-this DSpark/InstantTensor configuration is not evidence of that contract. The
+requires supported scheduler provenance and native detokenizer trace hooks;
+this DSpark/InstantTensor configuration has not been validated against them. The
 DeepSeek client therefore accepts `MODE=chunk` only and rejects exact and auto
 with exit status 64. Chunk mode is truthful for ordinary SSE and is the
 default.

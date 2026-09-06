@@ -1,32 +1,36 @@
-"""Opt-in exact scheduler-step adapter for the private vLLM 0.26 API.
+"""Opt-in provenance telemetry adapter for supported vLLM V1 contracts.
 
-The two hooks in this module deliberately do very little: they snapshot plain
-Python values into a bounded queue. Encoding and socket I/O happen on the
-background dispatcher thread, never in vLLM's output path.
+The scheduler process emits token IDs and authoritative roles.  The output
+processor process emits raw incremental text and a native-detokenizer trace.
+They are intentionally separate frames: vLLM transports ``EngineCoreOutput``
+between processes and does not provide a safe extension field for plugins.
+The client joins frames by request ID, absolute token offset, and token IDs.
 """
+
 from __future__ import annotations
 
 import importlib
+import inspect
+from functools import wraps
 import os
 import queue
 import re
-import socket
 import stat
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-Payload = tuple[int, str, str, int, int, int, tuple[int, ...], str, bool]
+Payload = tuple[Any, ...]
 
 _MAX_TIMESTAMP_STEPS = 4096
-
 _MAX_REQUEST_SEQUENCES = 4096
 _MAX_STREAM_INDEX = 4095
-
+_MAX_PENDING_TEXT = 4096
 
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _VERSION_RE = re.compile(r"^0\.26\.\d+(?:[.+-].*)?$")
+_SUPPORTED_FORK_VERSION = "0.1.dev20051+g487ecf187"
 _REQUEST_RE = re.compile(
     r"^(?:(?P<chat_prefix>chatcmpl-)?"
     r"(?P<request>ph1_(?P<run>[0-9a-f]{32})_(?P<stream>\d+))"
@@ -35,6 +39,7 @@ _REQUEST_RE = re.compile(
 )
 _ENABLED_VALUES = frozenset(("1", "true", "yes", "on", "enable", "enabled"))
 _DISABLED_VALUES = frozenset(("0", "false", "no", "off", "disable", "disabled"))
+_DRAFT_METHOD = "dflash"
 
 
 class VllmPluginError(RuntimeError):
@@ -47,13 +52,16 @@ _GLOBAL_STEPS: OrderedDict[Any, int] = OrderedDict()
 
 
 class _Dispatcher:
-    """Bounded, best-effort datagram sender."""
+    """Bounded, best-effort datagram sender kept off vLLM hot paths."""
 
     def __init__(self, socket_dir: Path, maxsize: int = 256) -> None:
         if maxsize <= 0:
             raise ValueError("queue size must be positive")
         self.socket_dir = socket_dir
-        self.queue: queue.Queue[Payload] = queue.Queue(maxsize=maxsize)
+        self.socket_uid = int(os.environ.get("PARALLELHUE_SOCKET_UID", str(os.getuid())))
+        if self.socket_uid < 0 or os.getuid() not in (0, self.socket_uid):
+            raise VllmPluginError("socket owner must be the current uid, unless the sender is root")
+        self.queue: queue.Queue[tuple[str, Payload]] = queue.Queue(maxsize=maxsize)
         self.dropped = 0
         self.sent = 0
         self.invalid_socket = 0
@@ -65,10 +73,10 @@ class _Dispatcher:
         )
         self._thread.start()
 
-    def submit(self, payload: Payload) -> bool:
+    def submit(self, frame_type: str, payload: Payload) -> bool:
         """Enqueue without ever blocking vLLM."""
         try:
-            self.queue.put_nowait(payload)
+            self.queue.put_nowait((frame_type, payload))
         except queue.Full:
             self.dropped += 1
             return False
@@ -79,42 +87,193 @@ class _Dispatcher:
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
-        # Protocol import is intentionally deferred to this non-hot thread.
-        from .protocol import StepEvent, encode_event
+        from .protocol import (
+            ProvenanceFrame,
+            TextFrame,
+            TraceSpan,
+            encode_provenance,
+            encode_text,
+        )
+
+        import socket
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
             sock.setblocking(False)
             while not self._stop.is_set() or not self.queue.empty():
                 try:
-                    item = self.queue.get(timeout=0.05)
+                    frame_type, item = self.queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
                 try:
-                    event = StepEvent(
-                        schema_version=item[0],
-                        run_id=item[1],
-                        request_id=item[2],
-                        sequence=item[3],
-                        step_id=item[4],
-                        choice_index=item[5],
-                        token_ids=item[6],
-                        text=item[7],
-                        finished=item[8],
-                    )
-                    encoded = encode_event(event)
-                    destination = self.socket_dir / f"{item[1]}.sock"
-                    if not validate_socket(destination, self.socket_dir):
+                    if frame_type == "provenance":
+                        (
+                            schema_version,
+                            run_id,
+                            request_id,
+                            source_sequence,
+                            token_offset,
+                            token_ids,
+                            roles,
+                            finished,
+                        ) = item
+                        encoded = encode_provenance(
+                            ProvenanceFrame(
+                                schema_version=schema_version,
+                                run_id=run_id,
+                                request_id=request_id,
+                                source_sequence=source_sequence,
+                                token_offset=token_offset,
+                                token_ids=token_ids,
+                                roles=roles,
+                                finished=finished,
+                            )
+                        )
+                    elif frame_type == "text":
+                        (
+                            schema_version,
+                            run_id,
+                            request_id,
+                            source_sequence,
+                            token_offset,
+                            step_id,
+                            choice_index,
+                            token_ids,
+                            text,
+                            trace,
+                            finished,
+                        ) = item
+                        encoded = encode_text(
+                            TextFrame(
+                                schema_version=schema_version,
+                                run_id=run_id,
+                                request_id=request_id,
+                                source_sequence=source_sequence,
+                                token_offset=token_offset,
+                                token_ids=token_ids,
+                                text=text,
+                                trace=tuple(TraceSpan(*span) for span in trace),
+                                step_id=step_id,
+                                choice_index=choice_index,
+                                finished=finished,
+                            )
+                        )
+                    else:
+                        self.invalid_socket += 1
+                        continue
+                    run_id = item[1]
+                    destination = self.socket_dir / f"{run_id}.sock"
+                    if not validate_socket(destination, self.socket_dir, socket_uid=self.socket_uid):
                         self.invalid_socket += 1
                         continue
                     sock.sendto(encoded, os.fspath(destination))
                     self.sent += 1
-                except (OSError, ValueError, TypeError):
+                except (OSError, ValueError, TypeError, KeyError):
                     self.invalid_socket += 1
                 finally:
                     self.queue.task_done()
 
+
+class _PendingText:
+    __slots__ = (
+        "token_offset",
+        "token_ids",
+        "text",
+        "trace",
+        "step_id",
+        "choice_index",
+        "finished",
+    )
+
+    def __init__(
+        self,
+        token_offset: int,
+        token_ids: tuple[int, ...],
+        text: str,
+        trace: tuple[tuple[int, int, int, int], ...],
+        step_id: int,
+        choice_index: int,
+        finished: bool,
+    ) -> None:
+        self.token_offset = token_offset
+        self.token_ids = token_ids
+        self.text = text
+        self.trace = trace
+        self.step_id = step_id
+        self.choice_index = choice_index
+        self.finished = finished
+
+
+class _TraceState:
+    """Consume native decoder pieces once, retaining only un-emitted bytes."""
+
+    def __init__(self, detokenizer: Any) -> None:
+        self.detokenizer = detokenizer
+        self.pieces: deque[tuple[bytes, int, int]] = deque()
+        self.pending_start = 0
+        self.failed = False
+
+    def record_piece(self, token_id: int, piece: Any) -> None:
+        if type(token_id) is not int or token_id < 0 or not isinstance(piece, str):
+            self.failed = True
+            return
+        end = self.detokenizer.num_output_tokens()
+        if end <= 0 or self.detokenizer.token_ids[-1] != token_id:
+            self.failed = True
+            return
+        if piece:
+            self.pieces.append((piece.encode("utf-8"), self.pending_start, end))
+            self.pending_start = end
+        if len(self.pieces) > _MAX_PENDING_TEXT:
+            self.failed = True
+
+    def trace_for(
+        self, token_offset: int, token_ids: tuple[int, ...], text: str,
+    ) -> tuple[tuple[int, int, int, int], ...] | None:
+        if self.failed:
+            return None
+        all_ids = self.detokenizer.token_ids
+        prompt_length = len(all_ids) - self.detokenizer.num_output_tokens()
+        start = prompt_length + token_offset
+        if tuple(all_ids[start:start + len(token_ids)]) != token_ids:
+            self.failed = True
+            return None
+        wanted = text.encode("utf-8")
+        cursor = 0
+        spans = []
+        while cursor < len(wanted):
+            if not self.pieces:
+                self.failed = True
+                return None
+            data, token_start, token_end = self.pieces.popleft()
+            count = min(len(data), len(wanted) - cursor)
+            if data[:count] != wanted[cursor:cursor + count]:
+                self.failed = True
+                return None
+            spans.append((cursor, cursor + count, token_start, token_end))
+            cursor += count
+            if count < len(data):
+                self.pieces.appendleft((data[count:], token_start, token_end))
+        return tuple(spans)
+
+
+class _ProvenancePlan:
+    __slots__ = ("request_id", "token_offset", "token_ids", "roles")
+
+    def __init__(
+        self,
+        request_id: str,
+        token_offset: int,
+        token_ids: tuple[int, ...],
+        roles: tuple[str, ...],
+    ) -> None:
+        self.request_id = request_id
+        self.token_offset = token_offset
+        self.token_ids = token_ids
+        self.roles = roles
+
+
 class VllmExactPlugin:
-    """Owns hooks and dispatcher for one vLLM engine process."""
+    """Own hooks and dispatchers for one vLLM engine/output process."""
 
     def __init__(self, socket_dir: str | os.PathLike[str], queue_size: int = 256) -> None:
         self.socket_dir = Path(socket_dir)
@@ -122,15 +281,21 @@ class VllmExactPlugin:
         self._local = threading.local()
         self._sequence_lock = threading.Lock()
         self._sequences: OrderedDict[str, int] = OrderedDict()
+        self._text_sequences: OrderedDict[str, int] = OrderedDict()
+        self._prov_sequences: OrderedDict[str, int] = OrderedDict()
+        self._text_offsets: OrderedDict[str, int] = OrderedDict()
+        self._pending_text: dict[str, deque[_PendingText]] = {}
+        self._trace_states: dict[int, _TraceState] = {}
+        self._request_trace_keys: dict[str, int] = {}
         self.invalid_requests = 0
         self.observed = 0
         self._patched = False
+        self._scheduler_capable = False
 
     def close(self) -> None:
         self.dispatcher.close()
 
     def step_for_timestamp(self, timestamp: Any) -> int:
-        """Return one process-global ID for every occurrence of a timestamp."""
         try:
             hash(timestamp)
         except TypeError as exc:
@@ -154,18 +319,83 @@ class VllmExactPlugin:
         self._local.step_id = step_id
         return step_id
 
-    def observe_request_output(self, request_output: Any) -> int:
-        """Snapshot an unmerged RequestOutput, returning number of queued items."""
-        request_id = getattr(request_output, "request_id", None)
+    def _canonical_request(self, request_id: Any) -> tuple[str, str, int] | None:
         parsed = _parse_request_id(request_id)
         if parsed is None:
+            return None
+        return parsed
+
+    def _record_invalid(self) -> None:
+        with self._sequence_lock:
             self.invalid_requests += 1
+
+    def _register_request_state(self, request_state: Any) -> None:
+        request_id = getattr(request_state, "external_req_id", None)
+        parsed = self._canonical_request(request_id)
+        if parsed is None:
+            return
+        detokenizer = getattr(request_state, "detokenizer", None)
+        if detokenizer is not None and len(self._trace_states) < _MAX_REQUEST_SEQUENCES:
+            self._trace_states[id(detokenizer)] = _TraceState(detokenizer)
+            self._request_trace_keys[parsed[0]] = id(detokenizer)
+
+    def _record_decode_piece(self, detokenizer: Any, token_id: int, piece: Any) -> None:
+        trace = self._trace_states.get(id(detokenizer))
+        if trace is not None:
+            trace.record_piece(token_id, piece)
+
+    def _capture_completion(self, request_state: Any, output: Any) -> None:
+        request_id = getattr(request_state, "external_req_id", None)
+        parsed = self._canonical_request(request_id)
+        if parsed is None:
+            self._record_invalid()
+            return
+        canonical_request_id, _run_id, _stream_index = parsed
+        token_ids = _token_tuple(getattr(output, "token_ids", ()))
+        offset = self._text_offsets.get(canonical_request_id, 0)
+        trace_state = self._trace_states.get(id(getattr(request_state, "detokenizer", None)))
+        text = getattr(output, "text", "")
+        if not isinstance(text, str):
+            self._record_invalid()
+            return
+        output_kind = getattr(request_state, "output_kind", None)
+        if output_kind is not None:
+            output_kind_name = getattr(output_kind, "name", str(output_kind)).upper()
+            if "DELTA" not in output_kind_name:
+                # Cumulative/full output cannot be joined to absolute token
+                # offsets without re-decoding history; fail closed.
+                self._record_invalid()
+                return
+        trace = trace_state.trace_for(offset, token_ids, text) if trace_state is not None else None
+        if trace is None:
+            self._record_invalid()
+            return
+        output_finished = bool(getattr(output, "finish_reason", None))
+        pending = self._pending_text.setdefault(canonical_request_id, deque())
+        if len(pending) >= _MAX_PENDING_TEXT:
+            self._record_invalid()
+            return
+        pending.append(
+            _PendingText(
+                offset,
+                token_ids,
+                text,
+                trace,
+                getattr(self._local, "step_id", 0),
+                _nonnegative_int(getattr(output, "index", 0), 0),
+                output_finished,
+            )
+        )
+        self._text_offsets[canonical_request_id] = offset + len(token_ids)
+
+    def observe_request_output(self, request_output: Any) -> int:
+        """Queue text frames from an unmerged RequestOutput."""
+        request_id = getattr(request_output, "request_id", None)
+        parsed = self._canonical_request(request_id)
+        if parsed is None:
+            self._record_invalid()
             return 0
         canonical_request_id, run_id, _stream_index = parsed
-        step_id = getattr(self._local, "step_id", None)
-        if step_id is None:
-            self.invalid_requests += 1
-            return 0
         outputs = getattr(request_output, "outputs", None)
         if outputs is None:
             outputs = ()
@@ -174,55 +404,185 @@ class VllmExactPlugin:
         except TypeError:
             choices = ()
         if len(choices) > 1:
-            self.invalid_requests += 1
+            self._record_invalid()
             return 0
         request_finished = _completion_state(getattr(request_output, "finished", False))
-        terminal = request_finished
-        with self._sequence_lock:
-            if (
-                canonical_request_id not in self._sequences
-                and len(self._sequences) >= _MAX_REQUEST_SEQUENCES
-            ):
-                self.invalid_requests += 1
-                return 0
-            sequence = self._sequences.get(canonical_request_id, 0)
-            self._sequences[canonical_request_id] = sequence + 1
-            self._sequences.move_to_end(canonical_request_id)
-            count = 0
-            for fallback_index, output in enumerate(choices):
-                choice_index = _nonnegative_int(
-                    getattr(output, "index", fallback_index), fallback_index
-                )
-                token_ids = _token_tuple(getattr(output, "token_ids", ()))
-                text = getattr(output, "text", "")
-                if not isinstance(text, str):
-                    text = str(text)
-                output_finished = getattr(output, "finished", None)
-                resolved_output_finished = _completion_state(output_finished)
-                item_finished = request_finished or resolved_output_finished
-                terminal = terminal or item_finished
-                payload: Payload = (
-                    1,
-                    run_id,
-                    canonical_request_id,
-                    sequence,
-                    step_id,
-                    choice_index,
-                    token_ids,
-                    text,
-                    item_finished,
-                )
-                self.observed += 1
-                if self.dispatcher.submit(payload):
-                    count += 1
-            if terminal:
-                self._sequences.pop(canonical_request_id, None)
+        pending = self._pending_text.get(canonical_request_id)
+        if pending is None or not choices:
+            self._record_invalid()
+            return 0
+        count = 0
+        for output in choices:
+            if not pending:
+                self._record_invalid()
+                break
+            item = pending.popleft()
+            observed_ids = _token_tuple(getattr(output, "token_ids", ()))
+            observed_text = getattr(output, "text", "")
+            if observed_ids != item.token_ids or observed_text != item.text:
+                self._record_invalid()
+                continue
+            finished = request_finished or item.finished
+            sequence = self._text_sequences.get(canonical_request_id, 0)
+            self._text_sequences[canonical_request_id] = sequence + 1
+            payload: Payload = (
+                2,
+                run_id,
+                canonical_request_id,
+                sequence,
+                item.token_offset,
+                item.step_id,
+                item.choice_index,
+                item.token_ids,
+                item.text,
+                item.trace,
+                finished,
+            )
+            self.observed += 1
+            if self.dispatcher.submit("text", payload):
+                count += 1
+            if finished:
+                self._finish_request(canonical_request_id)
         return count
 
-    def patch(self, vllm_module: Any) -> "VllmExactPlugin":
+    def _finish_request(self, request_id: str) -> None:
+        self._pending_text.pop(request_id, None)
+        self._text_sequences.pop(request_id, None)
+        self._prov_sequences.pop(request_id, None)
+        self._text_offsets.pop(request_id, None)
+        key = self._request_trace_keys.pop(request_id, None)
+        if key is not None:
+            self._trace_states.pop(key, None)
+
+    def _classify_roles(
+        self,
+        scheduler: Any,
+        request_id: str,
+        draft_ids: Any,
+        generated_ids: Any,
+    ) -> tuple[str, ...] | None:
+        generated = _token_tuple(generated_ids)
+        if getattr(scheduler, "num_sampled_tokens_per_step", None) != 1:
+            return None
+        if getattr(scheduler, "adaptive_mtp_controller", None) is not None:
+            return None
+        spec_method = _spec_method(scheduler)
+        if draft_ids is None:
+            if spec_method not in ("", "none", _DRAFT_METHOD):
+                return None
+            return tuple("target" for _ in generated)
+        drafts = _raw_token_tuple(draft_ids)
+        if spec_method != _DRAFT_METHOD or drafts is None:
+            return None
+        # The scheduler counts accepted tokens from the sampler's committed
+        # prefix, before stop truncation. Async drafting may use -1 placeholders;
+        # those are scheduled slots, not evidence that a token was rejected.
+        draft_count = len(drafts)
+        if len(generated) == 0:
+            return ()
+        accepted_count = len(generated) - 1
+        if accepted_count < 0 or accepted_count > draft_count:
+            return None
+        if any(drafts[index] >= 0 and generated[index] != drafts[index] for index in range(accepted_count)):
+            return None
+        final_role = "bonus" if draft_count > 0 and accepted_count == draft_count else "target"
+        return tuple(["accepted_draft"] * accepted_count + [final_role])
+
+    def _scheduler_plans(self, scheduler: Any, scheduler_output: Any, model_output: Any) -> dict[str, _ProvenancePlan]:
+        sampled = getattr(model_output, "sampled_token_ids", None)
+        req_ids = getattr(model_output, "req_ids", None)
+        if not isinstance(sampled, (list, tuple)) or not isinstance(req_ids, (list, tuple)):
+            return {}
+        scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", {})
+        requests = getattr(scheduler, "requests", {})
+        plans: dict[str, _ProvenancePlan] = {}
+        for index, internal_id in enumerate(req_ids):
+            if index >= len(sampled):
+                self._record_invalid()
+                continue
+            request = requests.get(internal_id) if hasattr(requests, "get") else None
+            external_id = getattr(request, "external_req_id", None) or internal_id
+            parsed = self._canonical_request(external_id)
+            if parsed is None:
+                self._record_invalid()
+                continue
+            canonical, _run_id, _stream_index = parsed
+            prior_ids = getattr(request, "_output_token_ids", None)
+            if not isinstance(prior_ids, list):
+                self._record_invalid()
+                continue
+            generated = _token_tuple(sampled[index])
+            draft_ids = scheduled.get(internal_id) if hasattr(scheduled, "get") else None
+            roles = self._classify_roles(scheduler, canonical, draft_ids, generated)
+            if roles is None:
+                self._record_invalid()
+                continue
+            plans[internal_id] = _ProvenancePlan(
+                canonical,
+                len(prior_ids),
+                generated,
+                roles,
+            )
+        return plans
+
+    def observe_scheduler_output(
+        self,
+        scheduler: Any,
+        scheduler_output: Any,
+        model_output: Any,
+        outputs: Any,
+        plans: dict[str, _ProvenancePlan] | None = None,
+    ) -> None:
+        if plans is None:
+            plans = self._scheduler_plans(scheduler, scheduler_output, model_output)
+        if not isinstance(outputs, Mapping):
+            self._record_invalid()
+            return
+        for engine_outputs in outputs.values():
+            if isinstance(engine_outputs, (list, tuple)):
+                output_items = engine_outputs
+            else:
+                output_items = getattr(engine_outputs, "outputs", ())
+            for output in output_items:
+                plan = plans.get(getattr(output, "request_id", None))
+                if plan is None:
+                    continue
+                emitted = _token_tuple(getattr(output, "new_token_ids", ()))
+                if len(emitted) > len(plan.token_ids) or emitted != plan.token_ids[: len(emitted)]:
+                    self._record_invalid()
+                    continue
+                if not emitted and not bool(getattr(output, "finished", False)):
+                    continue
+                sequence = self._prov_sequences.get(plan.request_id, 0)
+                self._prov_sequences[plan.request_id] = sequence + 1
+                payload: Payload = (
+                    2,
+                    _run_id_from_request(plan.request_id),
+                    plan.request_id,
+                    sequence,
+                    plan.token_offset,
+                    emitted,
+                    plan.roles[: len(emitted)],
+                    bool(getattr(output, "finished", False)),
+                )
+                self.dispatcher.submit("provenance", payload)
+                if bool(getattr(output, "finished", False)):
+                    self._prov_sequences.pop(plan.request_id, None)
+
+
+    def patch(self, vllm_module: Any, scheduler: Any | None = None) -> "VllmExactPlugin":
         output_processor, collector = _resolve_capabilities(vllm_module)
         _patch_method(output_processor, "process_outputs", self._process_wrapper)
         _patch_method(collector, "put", self._put_wrapper)
+        request_state, detokenizers = _resolve_detokenizer_capabilities()
+        if request_state is not None:
+            _patch_method(request_state, "__init__", self._request_state_wrapper)
+            _patch_method(request_state, "_new_completion_output", self._completion_wrapper)
+        for detokenizer in detokenizers:
+            _patch_method(detokenizer, "decode_next", self._decode_wrapper)
+        if scheduler is not None:
+            _patch_method(scheduler, "update_from_output", self._scheduler_wrapper)
+            self._scheduler_capable = True
         self._patched = True
         return self
 
@@ -239,9 +599,47 @@ class VllmExactPlugin:
     def _put_wrapper(self, original: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         request_output = _find_request_output(args, kwargs)
         if request_output is not None:
-            # Observe first; original collector semantics and return value are untouched.
             self.observe_request_output(request_output)
         return original(*args, **kwargs)
+
+    def _request_state_wrapper(self, original: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        request_state = args[0] if args else kwargs.get("self")
+        if request_state is not None:
+            self._register_request_state(request_state)
+        return result
+
+    def _decode_wrapper(self, original: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        detokenizer = args[0] if args else kwargs.get("self")
+        token_id = args[1] if len(args) > 1 else kwargs.get("next_token_id")
+        self._record_decode_piece(detokenizer, token_id, result)
+        return result
+
+    def _completion_wrapper(self, original: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        request_state = args[0] if args else kwargs.get("self")
+        if request_state is not None and result is not None:
+            self._capture_completion(request_state, result)
+        return result
+
+    def _scheduler_wrapper(self, original: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        scheduler = args[0] if args else kwargs.get("self")
+        scheduler_output = kwargs.get("scheduler_output")
+        model_output = kwargs.get("model_runner_output")
+        if len(args) > 1:
+            scheduler_output = args[1]
+        if len(args) > 2:
+            model_output = args[2]
+        plans = {}
+        if scheduler is not None and scheduler_output is not None and model_output is not None:
+            # Request._output_token_ids is mutated by the original method, so
+            # capture absolute offsets before handing control to vLLM.
+            plans = self._scheduler_plans(scheduler, scheduler_output, model_output)
+        outputs = original(*args, **kwargs)
+        if scheduler is not None and scheduler_output is not None and model_output is not None:
+            self.observe_scheduler_output(scheduler, scheduler_output, model_output, outputs, plans)
+        return outputs
 
 
 _PATCHED_CLASSES: dict[tuple[type[Any], str], VllmExactPlugin] = {}
@@ -256,6 +654,7 @@ def _patch_method(owner: Any, name: str, wrapper_factory: Callable[..., Any]) ->
         if getattr(current, "__parallelhue_vllm_wrapper__", False):
             return
 
+        @wraps(current)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             return wrapper_factory(current, *args, **kwargs)
 
@@ -281,12 +680,44 @@ def _resolve_capabilities(module: Any) -> tuple[Any, Any]:
         output_processor = output_processor or getattr(candidate, "OutputProcessor", None)
         collector = collector or getattr(candidate, "RequestOutputCollector", None)
     if output_processor is None or collector is None:
-        raise VllmPluginError("vLLM 0.26 exact hooks are unavailable")
+        raise VllmPluginError("vLLM exact output hooks are unavailable")
     if not callable(getattr(output_processor, "process_outputs", None)):
         raise VllmPluginError("OutputProcessor.process_outputs is unavailable")
     if not callable(getattr(collector, "put", None)):
         raise VllmPluginError("RequestOutputCollector.put is unavailable")
     return output_processor, collector
+
+
+def _resolve_scheduler(module: Any) -> Any | None:
+    candidates = [module]
+    for dotted in ("vllm.v1.core.sched.scheduler", "vllm.core.scheduler"):
+        try:
+            candidates.append(importlib.import_module(dotted))
+        except ImportError:
+            pass
+    for candidate in candidates:
+        scheduler = getattr(candidate, "Scheduler", None)
+        if callable(getattr(scheduler, "update_from_output", None)):
+            return scheduler
+    return None
+
+
+def _resolve_detokenizer_capabilities() -> tuple[Any | None, tuple[Any, ...]]:
+    try:
+        module = importlib.import_module("vllm.v1.engine.output_processor")
+        request_state = getattr(module, "RequestState", None)
+        detok_module = importlib.import_module("vllm.v1.engine.detokenizer")
+    except ImportError:
+        return None, ()
+    detokenizers = tuple(
+        cls
+        for cls in (
+            getattr(detok_module, "FastIncrementalDetokenizer", None),
+            getattr(detok_module, "SlowIncrementalDetokenizer", None),
+        )
+        if cls is not None
+    )
+    return request_state, detokenizers
 
 
 def _find_timestamp(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
@@ -317,6 +748,10 @@ def _parse_request_id(request_id: Any) -> tuple[str, str, int] | None:
     if not isinstance(request_id, str):
         return None
     match = _REQUEST_RE.fullmatch(request_id)
+    if match is None and re.search(r"-[0-9a-f]{8}$", request_id):
+        # EngineCore Request keeps only the randomized internal ID; unlike
+        # the API RequestState, it has no external_req_id field.
+        match = _REQUEST_RE.fullmatch(request_id[:-9])
     if match is None:
         return None
     completion = match.group("completion")
@@ -332,8 +767,14 @@ def _parse_request_id(request_id: Any) -> tuple[str, str, int] | None:
     return canonical, match.group("run"), int(stream)
 
 
+def _run_id_from_request(request_id: str) -> str:
+    parsed = _parse_request_id(request_id)
+    if parsed is None:
+        raise VllmPluginError("request ID is not ParallelHue-scoped")
+    return parsed[1]
+
+
 def _completion_state(value: Any) -> bool:
-    """Resolve vLLM completion flags while failing closed on malformed values."""
     if callable(value):
         try:
             value = value()
@@ -354,13 +795,39 @@ def _token_tuple(value: Any) -> tuple[int, ...]:
     if value is None:
         return ()
     try:
-        return tuple(int(item) for item in value)
-    except (TypeError, ValueError, OverflowError):
+        values = tuple(value)
+    except TypeError:
         return ()
+    if any(type(item) is not int or item < 0 for item in values):
+        return ()
+    return values
+
+def _raw_token_tuple(value: Any) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    try:
+        values = tuple(value)
+    except TypeError:
+        return None
+    if any(type(item) is not int or item < -1 for item in values):
+        return None
+    return values
 
 
-def validate_socket(path: str | os.PathLike[str], socket_dir: str | os.PathLike[str] | None = None) -> bool:
-    """Validate a run socket without following symlinks."""
+
+
+def _spec_method(scheduler: Any) -> str:
+    config = getattr(scheduler, "vllm_config", None)
+    speculative = getattr(config, "speculative_config", None)
+    if speculative is None:
+        return "none"
+    method = getattr(speculative, "method", None)
+    method = getattr(method, "value", method)
+    return str(method or "").strip().lower()
+
+
+def validate_socket(path: str | os.PathLike[str], socket_dir: str | os.PathLike[str] | None = None, *, socket_uid: int | None = None) -> bool:
+    """Validate a run socket without following symlinks or relaxing ownership."""
     path = Path(path)
     directory = Path(socket_dir) if socket_dir is not None else path.parent
     try:
@@ -372,7 +839,10 @@ def validate_socket(path: str | os.PathLike[str], socket_dir: str | os.PathLike[
         return False
     if stat.S_ISLNK(socket_stat.st_mode) or not stat.S_ISSOCK(socket_stat.st_mode):
         return False
-    if directory_stat.st_uid != os.getuid() or socket_stat.st_uid != os.getuid():
+    owner = os.getuid() if socket_uid is None else socket_uid
+    if type(owner) is not int or owner < 0 or os.getuid() not in (0, owner):
+        return False
+    if directory_stat.st_uid != owner or socket_stat.st_uid != owner:
         return False
     if stat.S_IMODE(directory_stat.st_mode) != 0o700 or stat.S_IMODE(socket_stat.st_mode) != 0o600:
         return False
@@ -389,11 +859,12 @@ def supports_vllm_version(module: Any) -> bool:
     if version is None:
         version_obj = getattr(module, "version", None)
         version = getattr(version_obj, "__version__", version_obj)
-    return isinstance(version, str) and _VERSION_RE.fullmatch(version) is not None
+    return isinstance(version, str) and (
+        _VERSION_RE.fullmatch(version) is not None or version == _SUPPORTED_FORK_VERSION
+    )
 
 
 def _stream_interval(processor: Any) -> int | None:
-    """Read stream_interval from the bound OutputProcessor instance."""
     if processor is None:
         return None
     candidates = [processor]
@@ -427,22 +898,35 @@ def install(
         try:
             vllm_module = importlib.import_module("vllm")
         except ImportError as exc:
-            raise VllmPluginError("exact mode requires vLLM 0.26.x") from exc
-    if not supports_vllm_version(vllm_module):
-        raise VllmPluginError("exact mode requires vLLM version 0.26.x")
+            raise VllmPluginError("exact mode requires a supported vLLM V1 API") from exc
     if socket_dir is None:
         socket_dir = os.environ.get("PARALLELHUE_SOCKET_DIR")
     if not socket_dir:
         raise VllmPluginError("exact mode requires PARALLELHUE_SOCKET_DIR")
-    output_processor, collector = _resolve_capabilities(vllm_module)
+    if not supports_vllm_version(vllm_module):
+        raise VllmPluginError("unsupported vLLM version for exact token provenance")
+    if stream_interval not in (None, 1):
+        raise VllmPluginError("exact mode requires stream_interval=1")
+    output_processor, _collector = _resolve_capabilities(vllm_module)
+    scheduler = _resolve_scheduler(vllm_module)
+    request_state, detokenizers = _resolve_detokenizer_capabilities()
+    if scheduler is None or request_state is None or not detokenizers:
+        raise VllmPluginError("scheduler and native detokenizer provenance hooks are required")
+    required = {
+        scheduler.update_from_output: {"scheduler_output", "model_runner_output"},
+        output_processor.process_outputs: {"engine_core_outputs", "engine_core_timestamp"},
+        request_state._new_completion_output: {"token_ids", "finish_reason"},
+    }
+    for method, parameters in required.items():
+        if not parameters.issubset(inspect.signature(method).parameters):
+            raise VllmPluginError("unsupported native provenance hook signature")
     with _PATCH_LOCK:
         existing = _PATCHED_CLASSES.get((output_processor, "process_outputs"))
         if existing is not None:
             return existing
         plugin = VllmExactPlugin(socket_dir, queue_size)
-        plugin.patch(vllm_module)
+        plugin.patch(vllm_module, scheduler)
         _PATCHED_CLASSES[(output_processor, "process_outputs")] = plugin
-        _PATCHED_CLASSES[(collector, "put")] = plugin
         return plugin
 
 
@@ -451,16 +935,12 @@ def register() -> VllmExactPlugin | None:
     return install()
 
 
-register_plugin = register
-patch_vllm = install
 
 __all__ = [
     "VllmExactPlugin",
     "VllmPluginError",
     "install",
-    "patch_vllm",
     "register",
-    "register_plugin",
     "supports_vllm_version",
     "validate_socket",
 ]

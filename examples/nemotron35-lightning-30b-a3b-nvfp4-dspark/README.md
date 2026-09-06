@@ -50,7 +50,13 @@ tmux ls | grep parallelhue
 tmux attach -t parallelhue-<id>
 ```
 
-Defaults: `--backend dspark --mode chunk --concurrency 16`.
+Defaults: `--backend dspark --mode chunk --concurrency 16`, with one distinct
+prompt per stream from the first 16 entries of the shared prompt bank. The
+runner passes `--prompt-file`; set
+`PARALLELHUE_PROMPT_FILE=/path/to/prompts.json` for a custom bank with enough
+non-empty, exact-distinct entries. Entries are selected in order and never
+cycled; an insufficient or duplicate bank is rejected before tmux or model
+startup. Direct `--prompt` input is for C1 only.
 
 ## Notes
 

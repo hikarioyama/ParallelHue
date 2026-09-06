@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
-PROMPT_FILE="$ROOT/examples/glm-5.3-flash-2x-rtxpro6000/prompts.json"
+PROMPT_FILE="${PARALLELHUE_PROMPT_FILE:-$ROOT/examples/glm-5.3-flash-2x-rtxpro6000/prompts.json}"
 if [[ -x "${PARALLELHUE_BIN:-}" ]]; then
   :
 elif [[ -x "$ROOT/.venv/bin/parallelhue" ]]; then
@@ -25,8 +25,8 @@ fi
 
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1/chat/completions}"
 MODEL="${MODEL:-glm-5.3-flash-local}"
-BACKEND="${BACKEND:-mtp}"   # GLM-5.3 Flash has MTP/ReplaySSM → color + spec counters
-MODE="${MODE:-chunk}"       # docker image has no ParallelHue vLLM exact plugin
+BACKEND="${BACKEND:-dflash}"
+MODE="${MODE:-exact}"       # requires the ParallelHue provenance plugin on vLLM
 CONCURRENCY="${CONCURRENCY:-16}"   # default only if unset; run-cN.sh sets it first
 MAX_TOKENS="${MAX_TOKENS:-1024}"
 TIMEOUT="${TIMEOUT:-180}"   # 16-way GLM can exceed the 60s CLI default
@@ -46,7 +46,7 @@ if [[ "${NO_ATTACH:-0}" == "1" ]]; then
   extra+=(--no-attach)
 fi
 
-# Each pane picks its own prompt from prompts.json via --worker-index.
+# Each pane picks its own prompt from the selected prompt bank via --worker-index.
 exec "$PARALLELHUE_BIN" \
   --endpoint "$ENDPOINT" \
   --model "$MODEL" \

@@ -5,11 +5,12 @@
 #
 # Usage (from a normal terminal, NOT already deep inside a tiny pane):
 #   ./run-c16.sh
-#   CONCURRENCY=32 ./run-c16.sh          # C32 (server must allow max-num-seqs>=32)
+#   PARALLELHUE_PROMPT_FILE=/path/to/prompts.json CONCURRENCY=32 ./run-c16.sh  # custom bank must contain at least 32 distinct entries
 #   MODE=exact MAX_TOKENS=2000 ./run-c16.sh
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+PROMPT_FILE="${PARALLELHUE_PROMPT_FILE:-$ROOT/examples/glm-5.3-flash-2x-rtxpro6000/prompts.json}"
 PARALLELHUE_BIN="${PARALLELHUE_BIN:-$ROOT/.venv/bin/parallelhue}"
 ENDPOINT="${ENDPOINT:-http://127.0.0.1:8000/v1/chat/completions}"
 MODEL="${MODEL:-qwen36-35b-a3b-nvfp4}"
@@ -17,7 +18,6 @@ BACKEND="${BACKEND:-mtp}"
 MODE="${MODE:-exact}"
 CONCURRENCY="${CONCURRENCY:-16}"
 MAX_TOKENS="${MAX_TOKENS:-2000}"
-PROMPT="${PROMPT:-Implement a production-quality concurrent LRU cache in Python with TTL, size limits, thread safety, typed APIs, unit tests, and clear module structure. Keep writing complete code and tests until the token limit.}"
 SOCKET_DIR="${PARALLELHUE_SOCKET_DIR:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/parallelhue}"
 
 [[ -x "$PARALLELHUE_BIN" ]] || {
@@ -37,4 +37,4 @@ exec "$PARALLELHUE_BIN" \
   --max-tokens "$MAX_TOKENS" \
   --mode "$MODE" \
   --tmux \
-  --prompt "$PROMPT"
+  --prompt-file "$PROMPT_FILE"

@@ -15,13 +15,61 @@ from urllib.parse import urlsplit
 from .metrics import _fetch_metrics
 
 
+from .prompts import load_prompt_file, select_prompts
+
+
+def _preflight_prompts(args: argparse.Namespace, count: int) -> None:
+    """Validate all prompt selection before creating a tmux session."""
+    if getattr(args, "prompt_file", None):
+        values = load_prompt_file(args.prompt_file)
+        select_prompts(
+            values,
+            count,
+            worker_index=getattr(args, "worker_index", None) if count == 1 else None,
+            source=f"prompt file {args.prompt_file!r}",
+        )
+        return
+    prompt = args.prompt or args.prompt_arg
+    select_prompts([prompt] if prompt else [], count, source="prompt")
+
+
+def _tile_eight(tmux: str, target: str, socket_path: str | None = None) -> None:
+    """Keep eight panes in an aligned 4x2 grid, including after terminal resize."""
+    command = [tmux, "-S", socket_path] if socket_path else [tmux]
+    geometry = subprocess.check_output(
+        [*command, "list-panes", "-t", target, "-F", "#{pane_id} #{window_width} #{window_height} #{window_zoomed_flag}"],
+        text=True,
+    ).splitlines()
+    if len(geometry) != 8 or geometry[0].split()[-1] == "1":
+        return
+    pane_ids = [line.split()[0].lstrip("%") for line in geometry]
+    width, height = map(int, geometry[0].split()[1:3])
+    widths = [(width - 3 + column) // 4 for column in range(4)]
+    heights = [(height - 1 + row) // 2 for row in range(2)]
+    rows, y = [], 0
+    for row, pane_height in enumerate(heights):
+        cells, x = [], 0
+        for column, pane_width in enumerate(widths):
+            cells.append(f"{pane_width}x{pane_height},{x},{y},{pane_ids[row * 4 + column]}")
+            x += pane_width + 1
+        rows.append(f"{width}x{pane_height},0,{y}" + "{" + ",".join(cells) + "}")
+        y += pane_height + 1
+    layout = f"{width}x{height},0,0[" + ",".join(rows) + "]"
+    checksum = 0
+    for char in layout:
+        checksum = (((checksum >> 1) | ((checksum & 1) << 15)) + ord(char)) & 0xffff
+    subprocess.run([*command, "select-layout", "-t", target, f"{checksum:04x},{layout}"], check=True, stdout=subprocess.DEVNULL)
+
+
+
 def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
     """Launch one tmux pane per stream and a summary pane."""
+    n = int(args.concurrency)
+    _preflight_prompts(args, n)
     tmux = shutil.which("tmux")
     if not tmux:
         print("parallelhue: tmux unavailable", file=sys.stderr)
         return 1
-    n = max(1, int(args.concurrency))
     session = "parallelhue-" + uuid.uuid4().hex[:8]
     summary_timeout = getattr(args, "summary_timeout", 3600.0)
     before_metrics = _fetch_metrics(args.endpoint, args.timeout)
@@ -121,6 +169,11 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
             run_tmux([tmux, "split-window", "-t", decode, "-h", pane_command(worker_index)])
             run_tmux([tmux, "select-layout", "-t", decode, "tiled"], check=False)
         run_tmux([tmux, "select-layout", "-t", decode, "tiled"], check=False)
+        if n == 8:
+            _tile_eight(tmux, decode)
+            rebalance = shlex.join([sys.executable, "-m", "parallelhue.tmux_launch", "#{socket_path}", "#{hook_window}"])
+            for hook in ("window-resized", "after-resize-window"):
+                run_tmux([tmux, "set-hook", "-a", "-w", "-t", decode, hook, "run-shell " + shlex.quote(rebalance)])
         run_tmux([tmux, "new-window", "-t", session, "-n", "summary", summary_command])
         run_tmux([tmux, "set-window-option", "-t", f"{session}:summary", "remain-on-exit", "on"], check=False)
         run_tmux([tmux, "select-window", "-t", decode], check=False)
@@ -140,3 +193,7 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
         while subprocess.run([tmux, "has-session", "-t", session], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             time.sleep(0.2)
     return 0
+
+
+if __name__ == "__main__":
+    _tile_eight(shutil.which("tmux") or "tmux", sys.argv[2], sys.argv[1])

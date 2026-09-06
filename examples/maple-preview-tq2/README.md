@@ -86,9 +86,17 @@ Defaults:
 - backend: `generic`
 - mode: `chunk`
 - max tokens: `1000`
-- prompt: long code-generation text so decode stays busy
+- prompt bank: the first N entries from the shared 16-entry bank, one distinct
+  prompt per stream
 - mild anti-repetition for Maple TQ2 continuous batching:
   `PARALLELHUE_FREQUENCY_PENALTY=0.3`, `PARALLELHUE_REPEAT_PENALTY=1.2`
+
+Parallel runs require a non-empty, exact-distinct prompt for every stream.
+The runners pass `--prompt-file`; override the shared bank with
+`PARALLELHUE_PROMPT_FILE=/path/to/prompts.json`. The first N entries are used
+in file order, without cycling. A bank shorter than the requested concurrency
+or containing duplicates is rejected before tmux or model startup. A direct
+`--prompt` is valid for C1 only.
 
 Override or clear anti-repetition if needed:
 

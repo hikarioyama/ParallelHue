@@ -96,7 +96,7 @@ def test_tmux_subprocess_arguments_use_worker_index_zero(monkeypatch):
     assert "--model" in worker_cmd and "demo" in worker_cmd
 
 
-def test_tmux_subprocess_arguments_assign_unique_worker_indices(monkeypatch):
+def test_tmux_subprocess_arguments_assign_unique_worker_indices(monkeypatch, tmp_path):
     calls = []
 
     class FixedUUID:
@@ -106,10 +106,14 @@ def test_tmux_subprocess_arguments_assign_unique_worker_indices(monkeypatch):
         calls.append((list(command), check))
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta", "gamma"]', encoding="utf-8")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
     monkeypatch.setattr(cli.uuid, "uuid4", lambda: FixedUUID())
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    args = cli.build_parser().parse_args(["--tmux", "--concurrency", "3", "hello"])
+    args = cli.build_parser().parse_args(
+        ["--tmux", "--concurrency", "3", "--prompt-file", str(prompt_file)]
+    )
 
     assert cli.launch_tmux(args, "parallelhue") == 0
     # worker 0 via respawn-pane; workers 1.. via split-window
@@ -126,7 +130,7 @@ def test_tmux_subprocess_arguments_assign_unique_worker_indices(monkeypatch):
     assert len(set(worker_indices)) == 3
 
 
-def test_non_tmux_worker_uses_configured_concurrency(monkeypatch):
+def test_non_tmux_worker_uses_configured_concurrency(monkeypatch, tmp_path):
     calls = {}
 
     class FakeClient:
@@ -137,13 +141,17 @@ def test_non_tmux_worker_uses_configured_concurrency(monkeypatch):
             calls["prompts"] = list(prompts)
             yield StreamChunk("ph1_" + "a" * 32 + "_0", 0, "safe", mode="SSE CHUNK MODE")
 
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli, "ParallelHueClient", FakeClient)
-    args = cli.build_parser().parse_args(["--mode", "chunk", "--concurrency", "2", "hello"])
+    args = cli.build_parser().parse_args(
+        ["--mode", "chunk", "--concurrency", "2", "--prompt-file", str(prompt_file)]
+    )
     assert cli.run_worker(args) == 0
-    assert calls == {"concurrency": 2, "prompts": ["hello", "hello"]}
+    assert calls == {"concurrency": 2, "prompts": ["alpha", "beta"]}
 
 
-def test_tmux_authenticated_workers_use_private_wrappers(monkeypatch):
+def test_tmux_authenticated_workers_use_private_wrappers(monkeypatch, tmp_path):
     calls = []
     inspected = []
     secret = "safe key 'with' $shell\nnewline"
@@ -166,10 +174,22 @@ def test_tmux_authenticated_workers_use_private_wrappers(monkeypatch):
             )
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
     monkeypatch.setattr(cli.uuid, "uuid4", lambda: FixedUUID())
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    args = cli.build_parser().parse_args(["--tmux", "--concurrency", "2", "--api-key", secret, "hello"])
+    args = cli.build_parser().parse_args(
+        [
+            "--tmux",
+            "--concurrency",
+            "2",
+            "--api-key",
+            secret,
+            "--prompt-file",
+            str(prompt_file),
+        ]
+    )
 
     try:
         assert cli.launch_tmux(args) == 0
@@ -196,7 +216,8 @@ def test_tmux_authenticated_workers_use_private_wrappers(monkeypatch):
         if inspected:
             shutil.rmtree(inspected[0][0].parent, ignore_errors=True)
 
-def test_tmux_partial_launch_failure_kills_session_and_cleans_private_runtime(monkeypatch):
+
+def test_tmux_partial_launch_failure_kills_session_and_cleans_private_runtime(monkeypatch, tmp_path):
     calls = []
     runtime_dir = None
 
@@ -221,10 +242,22 @@ def test_tmux_partial_launch_failure_kills_session_and_cleans_private_runtime(mo
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
     monkeypatch.setattr(cli.uuid, "uuid4", lambda: FixedUUID())
     monkeypatch.setattr(cli.subprocess, "run", fail_split)
-    args = cli.build_parser().parse_args(["--tmux", "--concurrency", "2", "--api-key", "secret", "hello"])
+    args = cli.build_parser().parse_args(
+        [
+            "--tmux",
+            "--concurrency",
+            "2",
+            "--api-key",
+            "secret",
+            "--prompt-file",
+            str(prompt_file),
+        ]
+    )
 
     assert cli.launch_tmux(args) == 1
 
@@ -233,7 +266,7 @@ def test_tmux_partial_launch_failure_kills_session_and_cleans_private_runtime(mo
     assert any(command[1] == "kill-session" for command, _ in calls)
 
 
-def test_tmux_authenticated_launch_failure_cleans_private_runtime(monkeypatch):
+def test_tmux_authenticated_launch_failure_cleans_private_runtime(monkeypatch, tmp_path):
     calls = []
     runtime_dir = None
 
@@ -246,13 +279,26 @@ def test_tmux_authenticated_launch_failure_cleans_private_runtime(monkeypatch):
             raise RuntimeError("tmux failed")
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
     monkeypatch.setattr(cli.subprocess, "run", fail_run)
-    args = cli.build_parser().parse_args(["--tmux", "--api-key", "secret", "hello"])
+    args = cli.build_parser().parse_args(
+        [
+            "--tmux",
+            "--concurrency",
+            "2",
+            "--api-key",
+            "secret",
+            "--prompt-file",
+            str(prompt_file),
+        ]
+    )
 
     # launch_tmux now catches and returns 1 instead of raising
     assert cli.launch_tmux(args) == 1
     assert any(command[1] == "new-session" for command, _ in calls)
+
 
 def test_main_sanitizes_client_error(monkeypatch, capsys):
     def fail(args):
@@ -262,7 +308,7 @@ def test_main_sanitizes_client_error(monkeypatch, capsys):
     assert cli.main(["hello"]) == 2
     assert "\x1b" not in capsys.readouterr().err
 
-def test_worker_cycles_prompt_file_for_concurrent_streams(monkeypatch, tmp_path):
+def test_worker_uses_prompt_file_entries_in_order(monkeypatch, tmp_path):
     calls = {}
 
     class FakeClient:
@@ -274,15 +320,117 @@ def test_worker_cycles_prompt_file_for_concurrent_streams(monkeypatch, tmp_path)
             yield StreamChunk("ph1_" + "a" * 32 + "_0", 0, "safe", mode="SSE CHUNK MODE")
 
     prompt_file = tmp_path / "prompts.json"
-    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
+    prompt_file.write_text('["alpha", "beta", "gamma"]', encoding="utf-8")
     monkeypatch.setattr(cli, "ParallelHueClient", FakeClient)
-    args = cli.build_parser().parse_args(["--mode", "chunk", "--concurrency", "3", "--prompt-file", str(prompt_file)])
+    args = cli.build_parser().parse_args(
+        ["--mode", "chunk", "--concurrency", "3", "--prompt-file", str(prompt_file)]
+    )
     assert cli.run_worker(args) == 0
     assert calls["config_prompt"] == "alpha"
-    assert calls["prompts"] == ["alpha", "beta", "alpha"]
+    assert calls["prompts"] == ["alpha", "beta", "gamma"]
 
 
-def test_worker_picks_prompt_by_worker_index(monkeypatch, tmp_path):
+def test_worker_rejects_insufficient_prompt_file_before_client(monkeypatch, tmp_path):
+    calls = {"init": 0}
+
+    class ExplodingClient:
+        def __init__(self, config):
+            calls["init"] += 1
+            raise AssertionError("client must not be created")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
+    monkeypatch.setattr(cli, "ParallelHueClient", ExplodingClient)
+    args = cli.build_parser().parse_args(
+        ["--mode", "chunk", "--concurrency", "3", "--prompt-file", str(prompt_file)]
+    )
+    with pytest.raises(ValueError):
+        cli.run_worker(args)
+    assert calls["init"] == 0
+
+
+def test_worker_rejects_duplicate_prompt_file_before_client(monkeypatch, tmp_path):
+    calls = {"init": 0}
+
+    class ExplodingClient:
+        def __init__(self, config):
+            calls["init"] += 1
+            raise AssertionError("client must not be created")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "alpha"]', encoding="utf-8")
+    monkeypatch.setattr(cli, "ParallelHueClient", ExplodingClient)
+    args = cli.build_parser().parse_args(
+        ["--mode", "chunk", "--concurrency", "2", "--prompt-file", str(prompt_file)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.run_worker(args)
+    assert exc.value.code == 64
+    assert calls["init"] == 0
+
+
+def test_tmux_rejects_insufficient_prompt_file_before_session(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, check=True, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["only prompt"]', encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
+    monkeypatch.setattr(cli, "_fetch_metrics", lambda endpoint, timeout: None)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert (
+        cli.main(
+            [
+                "--tmux",
+                "--concurrency",
+                "2",
+                "--prompt-file",
+                str(prompt_file),
+            ]
+        )
+        == 2
+    )
+    assert not any(
+        len(command) > 1 and command[1] == "new-session"
+        for command in calls
+    )
+
+
+def test_tmux_rejects_duplicate_prompt_file_before_session(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, check=True, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["same prompt", "same prompt"]', encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
+    monkeypatch.setattr(cli, "_fetch_metrics", lambda endpoint, timeout: None)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--tmux",
+                "--concurrency",
+                "2",
+                "--prompt-file",
+                str(prompt_file),
+            ]
+        )
+    assert exc.value.code == 64
+    assert not any(
+        len(command) > 1 and command[1] == "new-session"
+        for command in calls
+    )
+
+
+def test_worker_selects_prompt_by_bounded_worker_index(monkeypatch, tmp_path):
     calls = {}
 
     class FakeClient:
@@ -297,11 +445,59 @@ def test_worker_picks_prompt_by_worker_index(monkeypatch, tmp_path):
     prompt_file = tmp_path / "prompts.json"
     prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli, "ParallelHueClient", FakeClient)
-    args = cli.build_parser().parse_args(["--mode", "chunk", "--prompt-file", str(prompt_file), "--worker-index", "3"])
+    args = cli.build_parser().parse_args(
+        [
+            "--mode",
+            "chunk",
+            "--prompt-file",
+            str(prompt_file),
+            "--worker-index",
+            "1",
+        ]
+    )
     assert cli.run_worker(args) == 0
-    assert calls["config_prompt"] == "beta"
-    assert calls["prompt"] == "beta"
-    assert calls["stream_index"] == 3
+    assert calls == {"config_prompt": "beta", "prompt": "beta", "stream_index": 1}
+
+
+def test_worker_rejects_out_of_range_worker_index_before_client(monkeypatch, tmp_path):
+    calls = {"init": 0}
+
+    class ExplodingClient:
+        def __init__(self, config):
+            calls["init"] += 1
+            raise AssertionError("client must not be created")
+
+    prompt_file = tmp_path / "prompts.json"
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
+    monkeypatch.setattr(cli, "ParallelHueClient", ExplodingClient)
+    args = cli.build_parser().parse_args(
+        [
+            "--mode",
+            "chunk",
+            "--prompt-file",
+            str(prompt_file),
+            "--worker-index",
+            "2",
+        ]
+    )
+    with pytest.raises(ValueError):
+        cli.run_worker(args)
+    assert calls["init"] == 0
+
+
+def test_worker_rejects_direct_prompt_for_parallel_streams_before_client(monkeypatch):
+    calls = {"init": 0}
+
+    class ExplodingClient:
+        def __init__(self, config):
+            calls["init"] += 1
+            raise AssertionError("client must not be created")
+
+    monkeypatch.setattr(cli, "ParallelHueClient", ExplodingClient)
+    args = cli.build_parser().parse_args(["--mode", "chunk", "--concurrency", "2", "hello"])
+    with pytest.raises(ValueError):
+        cli.run_worker(args)
+    assert calls["init"] == 0
 
 
 def test_worker_rejects_empty_prompt_file(monkeypatch, tmp_path, capsys):
@@ -325,7 +521,7 @@ def test_tmux_propagates_prompt_file_without_prompt(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, "", "")
 
     prompt_file = tmp_path / "prompts.json"
-    prompt_file.write_text('["alpha"]', encoding="utf-8")
+    prompt_file.write_text('["alpha", "beta"]', encoding="utf-8")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/tmux")
     monkeypatch.setattr(cli.uuid, "uuid4", lambda: FixedUUID())
     monkeypatch.setattr(cli.subprocess, "run", fake_run)

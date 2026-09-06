@@ -6,7 +6,8 @@
 #
 # Usage (from a normal terminal, NOT already deep inside a tiny pane):
 #   ./run-c16.sh
-#   CONCURRENCY=32 ./run-c16.sh          # C32 (server must allow max-num-seqs>=32)
+#   PARALLELHUE_PROMPT_FILE=/path/to/prompts.json CONCURRENCY=32 ./run-c16.sh
+#     (custom bank must contain at least 32 distinct entries; server must allow max-num-seqs>=32)
 #   NO_ATTACH=1 ./run-c16.sh             # create session, do not attach (scripts/CI)
 #   MAX_TOKENS=2000 ./run-c16.sh
 set -euo pipefail

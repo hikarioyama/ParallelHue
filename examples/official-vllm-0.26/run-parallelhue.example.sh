@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Public-safe exact/chunk client for the guarded example server.
+# C1 keeps the direct prompt below; for C>1, set PARALLELHUE_PROMPT_FILE
+# to a bank with at least that many distinct entries.
 set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+PROMPT_FILE="${PARALLELHUE_PROMPT_FILE:-$ROOT/examples/glm-5.3-flash-2x-rtxpro6000/prompts.json}"
 
 MODE="${1:-exact}"
 PARALLELHUE_BIN="${PARALLELHUE_BIN:-parallelhue}"
@@ -23,6 +27,10 @@ case "$MODE" in
     exit 64
     ;;
 esac
+prompt_args=(--prompt "$PROMPT")
+if (( CONCURRENCY > 1 )); then
+  prompt_args=(--prompt-file "$PROMPT_FILE")
+fi
 
 install -d -m 700 "$SOCKET_DIR"
 export PARALLELHUE_SOCKET_DIR="$SOCKET_DIR"
@@ -33,4 +41,4 @@ exec "$PARALLELHUE_BIN" \
   --concurrency "$CONCURRENCY" \
   --mode "$MODE" \
   --timeout "$TIMEOUT" \
-  --prompt "$PROMPT"
+  "${prompt_args[@]}"

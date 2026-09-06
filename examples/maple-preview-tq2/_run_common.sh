@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+PROMPT_FILE="${PARALLELHUE_PROMPT_FILE:-$ROOT/examples/glm-5.3-flash-2x-rtxpro6000/prompts.json}"
 if [[ -x "${PARALLELHUE_BIN:-}" ]]; then
   :
 elif [[ -x "$ROOT/.venv/bin/parallelhue" ]]; then
@@ -20,7 +21,6 @@ BACKEND="${BACKEND:-generic}"
 MODE="${MODE:-chunk}"
 CONCURRENCY="${CONCURRENCY:-16}"
 MAX_TOKENS="${MAX_TOKENS:-1000}"
-PROMPT="${PROMPT:-Implement a production-quality concurrent LRU cache in Python with TTL, size limits, thread safety, typed APIs, unit tests, and clear module structure. Keep writing complete code and tests until the token limit. Do not stop early.}"
 
 [[ -x "$PARALLELHUE_BIN" ]] || {
   printf 'missing parallelhue bin: %s (pip install -e . in the repo, or set PARALLELHUE_BIN)\n' "$PARALLELHUE_BIN" >&2
@@ -47,5 +47,5 @@ exec "$PARALLELHUE_BIN" \
   --concurrency "$CONCURRENCY" \
   --max-tokens "$MAX_TOKENS" \
   --mode "$MODE" \
-  --prompt "$PROMPT" \
+  --prompt-file "$PROMPT_FILE" \
   "${extra[@]}"

@@ -19,7 +19,7 @@ from .metrics import _counter_delta, _metrics_url as _metrics_url_impl, _parse_p
 from .render import sanitize_terminal
 from . import summary as _summary
 from . import tmux_launch as _tmux_launch
-from .prompts import PromptFileError, load_prompt_file
+from .prompts import PromptFileError, load_prompt_file, select_prompts
 
 _summary_decode_panes_running = _summary._decode_panes_running
 
@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt_arg", nargs="?", help="prompt (or use --prompt)")
     parser.add_argument("--endpoint", default=os.environ.get("PARALLELHUE_ENDPOINT", "http://127.0.0.1:8000/v1/chat/completions"))
     parser.add_argument("--model", default=os.environ.get("PARALLELHUE_MODEL", ""))
-    parser.add_argument("--backend", choices=("auto", "generic", "mtp", "dspark"), default=os.environ.get("PARALLELHUE_BACKEND", "auto"), help="metrics backend profile (default: PARALLELHUE_BACKEND or auto)")
+    parser.add_argument("--backend", choices=("auto", "generic", "mtp", "dflash", "dspark"), default=os.environ.get("PARALLELHUE_BACKEND", "auto"), help="metrics backend profile (default: PARALLELHUE_BACKEND or auto)")
     parser.add_argument("--prompt", dest="prompt", default=os.environ.get("PARALLELHUE_PROMPT", ""))
     parser.add_argument("--prompt-file", default=os.environ.get("PARALLELHUE_PROMPT_FILE"), help="JSON array of prompts, one per stream (overrides --prompt)")
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("PARALLELHUE_MAX_TOKENS", "128")))
@@ -99,6 +99,7 @@ def launch_tmux(args: argparse.Namespace, argv0: str | None = None) -> int:
 
 def run_worker(args: argparse.Namespace) -> int:
     worker_index = 0 if args.worker_index is None else int(args.worker_index)
+    concurrency = int(args.concurrency)
     stream_prompts: list[str] | None = None
     if args.prompt_file:
         try:
@@ -106,26 +107,29 @@ def run_worker(args: argparse.Namespace) -> int:
         except PromptFileError as exc:
             print(f"parallelhue: {exc}", file=sys.stderr)
             raise SystemExit(64) from exc
-        if args.concurrency > 1:
-            stream_prompts = [file_prompts[i % len(file_prompts)] for i in range(args.concurrency)]
-            prompt = stream_prompts[0]
-        else:
-            # One pane per stream (tmux path): pick by worker index so each
-            # pane runs a distinct prompt, cycling when there are more panes
-            # than prompts.
-            prompt = file_prompts[worker_index % len(file_prompts)]
+        selected = select_prompts(
+            file_prompts,
+            concurrency,
+            worker_index=worker_index if concurrency == 1 else None,
+            source=f"prompt file {args.prompt_file!r}",
+        )
+        prompt = selected[0]
+        if concurrency > 1:
+            stream_prompts = selected
     else:
         prompt = args.prompt or args.prompt_arg
         if not prompt:
             raise SystemExit("parallelhue: a prompt is required (use --prompt or a positional prompt)")
-        if args.concurrency > 1:
-            stream_prompts = [prompt] * args.concurrency
+        selected = select_prompts([prompt], concurrency, source="prompt")
+        prompt = selected[0]
+        if concurrency > 1:
+            stream_prompts = selected
     config = ClientConfig(endpoint=args.endpoint, model=args.model, prompt=prompt, max_tokens=args.max_tokens,
-                          concurrency=args.concurrency, api_key=args.api_key, mode=args.mode,
+                          concurrency=concurrency, api_key=args.api_key, mode=args.mode,
                           backend=args.backend, socket_dir=args.socket_dir, timeout=args.timeout)
     client = ParallelHueClient(config)
     printed_label: str | None = None
-    if args.concurrency == 1 and args.worker_index is not None:
+    if concurrency == 1 and args.worker_index is not None:
         total = os.environ.get("PARALLELHUE_TOTAL")
         print(f"[{worker_index + 1}/{total}]" if total and total.isdigit() else f"[{worker_index + 1}]", flush=True)
     delay_raw = os.environ.get("PARALLELHUE_START_DELAY", "").strip()
@@ -141,12 +145,24 @@ def run_worker(args: argparse.Namespace) -> int:
                 time.sleep(0.1)
             print("\n[START]", flush=True)
     streams = client.stream_many(stream_prompts) if stream_prompts is not None else client.stream(prompt, stream_index=worker_index)
+    role_counts = {"accepted_draft": 0, "target": 0, "bonus": 0}
+    mixed_spans = 0
     for item in streams:
         if item.mode != printed_label:
             print(f"[{item.mode}]", file=sys.stderr)
             printed_label = item.mode
+        for token in item.tokens:
+            role_counts[token.role] += 1
+        mixed_spans += int(item.ambiguous)
         print(item.text, end="", flush=True)
     print()
+    if any(role_counts.values()):
+        print(
+            f"[accepted draft={role_counts['accepted_draft']} tokens; "
+            f"target={role_counts['target']} tokens; bonus={role_counts['bonus']} tokens; "
+            f"mixed spans={mixed_spans}]",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -154,12 +170,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.summary_follow:
         return run_summary(args)
-    if args.tmux and not args.no_tmux:
-        if shutil.which("tmux"):
-            return launch_tmux(args, sys.argv[0])
-        print("parallelhue: tmux unavailable; using single-terminal worker path", file=sys.stderr)
     try:
+        if args.tmux and not args.no_tmux:
+            if shutil.which("tmux"):
+                return launch_tmux(args, sys.argv[0])
+            print("parallelhue: tmux unavailable; using single-terminal worker path", file=sys.stderr)
         return run_worker(args)
+    except PromptFileError as exc:
+        print(f"parallelhue: {exc}", file=sys.stderr)
+        raise SystemExit(64) from exc
     except ClientError as exc:
         print(f"parallelhue: {sanitize_terminal(str(exc))}", file=sys.stderr)
         return 2

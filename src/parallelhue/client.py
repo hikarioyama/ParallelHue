@@ -1,9 +1,8 @@
 """Standard-library OpenAI-compatible streaming client for ParallelHue.
 
-The client deliberately treats scheduler telemetry as optional.  Only the exact
-mode is allowed to claim scheduler-step coloring; ordinary SSE chunks are always
-labeled as such. Stream colors are further gated: without a speculative-decoding
-backend (MTP/DSpark/…), text stays monochrome even in exact/chunk modes.
+Exact mode consumes two authoritative telemetry streams: scheduler provenance
+and output text/trace. Ordinary SSE chunks remain an explicit fallback and
+never claim token provenance.
 """
 from __future__ import annotations
 
@@ -21,10 +20,23 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping, Sequence
 
 from .backends import get_backend
-from .protocol import StepEvent, decode_event, parse_request_id
-from .render import StepReconciler, colorize, sanitize_terminal
+from .prompts import validate_prompt_values
+from .protocol import (
+    ProvenanceFrame,
+    TextFrame,
+    TokenRecord,
+    TokenRole,
+    decode_frame,
+)
+from .render import (
+    PALETTE,
+    StepPalette,
+    StepReconciler,
+    colorize,
+    sanitize_terminal,
+)
 
-PALETTE = (46, 196, 27, 226)
+EXACT_MODE_LABEL = "EXACT TOKEN PROVENANCE"
 
 
 class ClientError(RuntimeError):
@@ -69,7 +81,19 @@ class StreamChunk:
     color: int | None = None
     step_id: int | None = None
     raw_text: str = field(default="", repr=False)
+    tokens: tuple[TokenRecord, ...] = ()
+    token_offset: int | None = None
+    role: TokenRole | None = None
+    ambiguous: bool = False
+    source_sequence: int | None = None
+    provenance_sequence: int | None = None
 
+    @property
+    def roles(self) -> tuple[TokenRole, ...]:
+        return tuple(token.role for token in self.tokens)
+
+
+TelemetryFrame = ProvenanceFrame | TextFrame
 
 class UnixTelemetryReceiver:
     """Bounded, run-scoped AF_UNIX datagram receiver.
@@ -86,10 +110,12 @@ class UnixTelemetryReceiver:
         if len(run_id) != 32 or any(c not in "0123456789abcdef" for c in run_id):
             raise ValueError("run_id must be 32 lowercase hexadecimal characters")
         self.run_id = run_id
-        self.socket_dir = os.path.abspath(socket_dir or os.environ.get("PARALLELHUE_SOCKET_DIR", "/tmp/parallelhue"))
+        default_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        self.socket_dir = os.path.abspath(
+            socket_dir or os.environ.get("PARALLELHUE_SOCKET_DIR") or os.path.join(default_runtime, "parallelhue")
+        )
         self.path = os.path.join(self.socket_dir, f"{run_id}.sock")
-        self._events: queue.Queue[StepEvent] = queue.Queue(maxsize=max_events)
-        self._mailboxes: dict[str, list[StepEvent]] = {}
+        self._mailboxes: dict[str, list[TelemetryFrame]] = {}
         self._condition = threading.Condition()
         self._max_events = max_events
         self._overflow = False
@@ -151,30 +177,30 @@ class UnixTelemetryReceiver:
             except OSError:
                 break
             try:
-                event = decode_event(data)
-                if event.run_id != self.run_id:
+                frame = decode_frame(data)
+                if frame.run_id != self.run_id:
                     continue
                 with self._condition:
                     total = sum(len(items) for items in self._mailboxes.values())
                     if total >= self._max_events:
                         self._overflow = True
                     else:
-                        self._mailboxes.setdefault(event.request_id, []).append(event)
+                        self._mailboxes.setdefault(frame.request_id, []).append(frame)
                     self._condition.notify_all()
             except (ValueError, TypeError, json.JSONDecodeError):
                 with self._condition:
                     self._overflow = True
                     self._condition.notify_all()
 
-    def drain(self, request_id: str | None = None) -> list[StepEvent]:
+    def drain(self, request_id: str | None = None) -> list[TelemetryFrame]:
         with self._condition:
             if request_id is None:
-                out = [event for mailbox in self._mailboxes.values() for event in mailbox]
+                out = [frame for mailbox in self._mailboxes.values() for frame in mailbox]
                 self._mailboxes.clear()
                 return out
             return self._mailboxes.pop(request_id, [])
 
-    def wait_for(self, request_id: str, timeout: float) -> list[StepEvent]:
+    def wait_for(self, request_id: str, timeout: float) -> list[TelemetryFrame]:
         """Wait briefly for this request's mailbox without draining peers."""
         deadline = time.monotonic() + max(0.0, timeout)
         with self._condition:
@@ -270,76 +296,54 @@ class ParallelHueClient:
         self.config = config or ClientConfig()
         self._opener = opener
         self._backend = get_backend(self.config.backend, self.config.model)
-        # Colors encode speculative contribution. Non-spec backends stay plain.
+        # Colors encode verified generation steps. Non-spec backends stay plain.
         self._color_enabled = bool(self._backend.uses_speculative_decoding)
 
-    def _paint(self, text: str, *, step_id: int | None = None, color: int | None = None) -> tuple[str, int | None]:
-        """Return display text and palette color; monochrome when non-speculative.
-
-        Also monochrome when ``NO_COLOR`` is set (https://no-color.org/).
-        """
-        if not text:
+    def _paint(
+        self,
+        text: str,
+        *,
+        ambiguous: bool = False,
+        color: int | None = None,
+    ) -> tuple[str, int | None]:
+        """Return display text and selected palette color."""
+        safe = sanitize_terminal(text)
+        if not safe:
             return "", None
-        if (not self._color_enabled) or os.environ.get("NO_COLOR", ""):
-            return text, None
-        if step_id is not None:
-            return colorize(text, step_id=step_id), PALETTE[step_id % len(PALETTE)]
-        selected = color if color is not None else PALETTE[0]
-        return colorize(text, selected), selected
+        if not self._color_enabled or os.environ.get("NO_COLOR", ""):
+            return safe, None
+        if ambiguous or color is None:
+            return safe, None
+        return colorize(safe, color=color), color
 
     def _request(self, prompt: str, request_id: str) -> Any:
-        endpoint = self.config.endpoint.rstrip("/")
-        is_chat = endpoint.endswith("/chat/completions")
-        # Prefer live parallel viewing over forced full-length degeneration.
-        # Opt into the old dspark8 continuous-fill behavior with
-        # PARALLELHUE_FORCE_FULL_LENGTH=1.
+        is_chat = self.config.endpoint.rstrip("/").endswith("/chat/completions")
         force_full = bool(os.environ.get("PARALLELHUE_FORCE_FULL_LENGTH", "").strip())
-        try:
-            stream_index = int(str(request_id).rsplit("_", 1)[-1])
-        except ValueError:
-            stream_index = 0
-        temperature = float(os.environ.get("PARALLELHUE_TEMPERATURE", "0.8" if not force_full else "0"))
+        stream_index = int(request_id.rsplit("_", 1)[-1])
         payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
             "stream": True,
             "return_token_ids": True,
             "request_id": request_id,
-            "temperature": temperature,
-            # Distinct seeds so concurrent panes diverge under sampling.
+            "temperature": float(os.environ.get("PARALLELHUE_TEMPERATURE", "0" if force_full else "0.8")),
             "seed": stream_index,
             "stream_options": {"include_usage": True},
         }
-        # Optional sampling knobs. Unset = omit from payload (backend default).
-        # Maple TQ2 high-concurrency runs may set:
-        #   PARALLELHUE_FREQUENCY_PENALTY=0.3
-        #   PARALLELHUE_REPEAT_PENALTY=1.2
-        def _env_float(name: str) -> float | None:
-            raw = os.environ.get(name)
-            if raw is None:
-                return None
-            raw = raw.strip()
-            if raw == "":
-                return None
-            return float(raw)
-
-        frequency_penalty = _env_float("PARALLELHUE_FREQUENCY_PENALTY")
-        presence_penalty = _env_float("PARALLELHUE_PRESENCE_PENALTY")
-        repeat_penalty = _env_float("PARALLELHUE_REPEAT_PENALTY")
-        if frequency_penalty is not None:
-            payload["frequency_penalty"] = frequency_penalty
-        if presence_penalty is not None:
-            payload["presence_penalty"] = presence_penalty
-        if repeat_penalty is not None:
-            payload["repeat_penalty"] = repeat_penalty
+        for name, variable in (
+            ("frequency_penalty", "PARALLELHUE_FREQUENCY_PENALTY"),
+            ("presence_penalty", "PARALLELHUE_PRESENCE_PENALTY"),
+            ("repeat_penalty", "PARALLELHUE_REPEAT_PENALTY"),
+        ):
+            value = os.environ.get(variable, "").strip()
+            if value:
+                payload[name] = float(value)
         if force_full:
-            payload["ignore_eos"] = True
-            payload["min_tokens"] = self.config.max_tokens
+            payload.update(ignore_eos=True, min_tokens=self.config.max_tokens)
         if is_chat:
             payload["messages"] = [{"role": "user", "content": prompt}]
         else:
             payload["prompt"] = prompt
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
@@ -347,50 +351,95 @@ class ParallelHueClient:
         }
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        req = urllib.request.Request(self.config.endpoint, data=data, headers=headers, method="POST")
+        request = urllib.request.Request(
+            self.config.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
         try:
-            return self._opener(req, timeout=self.config.timeout)
+            return self._opener(request, timeout=self.config.timeout)
         except urllib.error.HTTPError as exc:
             body = sanitize_terminal(exc.read(4096).decode("utf-8", "replace"))
             raise ClientError(f"HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
-            reason = sanitize_terminal(str(exc.reason))
-            raise ClientError(f"unable to reach endpoint: {reason}") from exc
-
-    @staticmethod
-    def _result_color(result: Any) -> tuple[int | None, int | None]:
-        events = getattr(result, "events", None)
-        if isinstance(events, (list, tuple)) and events:
-            event = events[0]
-            return getattr(event, "step_id", None), PALETTE[getattr(event, "choice_index", 0) % len(PALETTE)]
-        if isinstance(result, (list, tuple)) and result:
-            event = result[0]
-            return getattr(event, "step_id", None), PALETTE[getattr(event, "choice_index", 0) % len(PALETTE)]
-        event = getattr(result, "event", result)
-        if event is not None:
-            return getattr(event, "step_id", None), getattr(result, "color", None) or PALETTE[getattr(event, "choice_index", 0) % len(PALETTE)]
-        return None, None
+            raise ClientError(f"unable to reach endpoint: {sanitize_terminal(str(exc.reason))}") from exc
 
     def _stream_with_receiver(self, prompt: str, stream_index: int, run_id: str, receiver: UnixTelemetryReceiver | None) -> Iterator[StreamChunk]:
         request_id = f"ph1_{run_id}_{stream_index}"
         reconciler = StepReconciler() if self.config.mode in {"exact", "auto"} else None
-        exact_enabled = self.config.mode in {"exact", "auto"}
         auto_downgraded = False
-        seen = False
-        terminal_matched = False
         sequence = 0
+        step_palette = StepPalette()
+        buffered_text = ""
+        buffered_ids: list[int] = []
         response = self._request(prompt, request_id)
 
-        def collect_events() -> None:
-            nonlocal seen
-            if receiver is None or reconciler is None or auto_downgraded:
-                return
-            events = receiver.drain(request_id)
-            if not events:
-                events = receiver.wait_for(request_id, min(0.1, max(0.01, self.config.timeout * 0.01)))
-            for event in events:
-                seen = True
-                reconciler.feed(event)
+        def match(text: str, ids: tuple[int, ...]):
+            if receiver is None or reconciler is None:
+                return None
+            deadline = time.monotonic() + min(2.0, self.config.timeout)
+            while not receiver.overflow:
+                for frame in receiver.drain(request_id):
+                    reconciler.push(frame)
+                result = reconciler.reconcile_chunk(request_id, text, ids)
+                if result is not None or reconciler.failed(request_id) or reconciler.waiting_for_output(request_id):
+                    return result
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                for frame in receiver.wait_for(request_id, min(0.1, remaining)):
+                    reconciler.push(frame)
+            return None
+
+        def render_result(result):
+            nonlocal sequence
+            for event in result.events:
+                step_palette.color_for(event.step_id)
+                parts: list[str] = []
+                segment_colors: list[int] = []
+                segment_step_ids: list[int] = []
+                has_ambiguous = False
+                for segment in event.segments:
+                    has_ambiguous = has_ambiguous or segment.ambiguous
+                    segment_step_id = (
+                        segment.step_id
+                        if segment.step_id is not None
+                        else (event.step_id if not segment.ambiguous else None)
+                    )
+                    selected = (
+                        step_palette.color_for(segment_step_id)
+                        if segment_step_id is not None
+                        else None
+                    )
+                    painted, selected = self._paint(
+                        segment.text, ambiguous=segment.ambiguous, color=selected,
+                    )
+                    parts.append(painted)
+                    if selected is not None:
+                        segment_colors.append(selected)
+                        segment_step_ids.append(segment_step_id)
+                uniform_color = None
+                if (
+                    segment_colors
+                    and not has_ambiguous
+                    and len(set(segment_step_ids)) == 1
+                    and len(set(segment_colors)) == 1
+                ):
+                    uniform_color = segment_colors[0]
+                roles = event.roles
+                role = roles[0] if roles and all(item == roles[0] for item in roles) else None
+                yield StreamChunk(
+                    request_id=request_id, sequence=sequence, text="".join(parts),
+                    token_ids=event.token_ids, finished=event.finished,
+                    mode=EXACT_MODE_LABEL, color=uniform_color, step_id=event.step_id,
+                    raw_text=event.text, tokens=event.tokens,
+                    token_offset=event.token_offset, role=role,
+                    ambiguous=has_ambiguous,
+                    source_sequence=event.source_sequence,
+                    provenance_sequence=event.provenance_sequence,
+                )
+                sequence += 1
 
         try:
             for payload in iter_sse(response):
@@ -399,72 +448,52 @@ class ParallelHueClient:
                 raw_text = _extract_text(choice)
                 token_ids = _extract_token_ids(payload, choice)
                 finished = bool(choice.get("finish_reason"))
-                # Role-only and final metadata frames carry no model output and
-                # must never be presented to the exact reconciler.
-                if not raw_text and not token_ids:
+                if not raw_text and not token_ids and not finished:
                     continue
-
-                result = None
-                telemetry_failed = False
-                if exact_enabled and not auto_downgraded:
-                    collect_events()
-                    result = reconciler.reconcile_chunk(request_id, raw_text, token_ids) if reconciler is not None else None
-                    for _ in range(4):
-                        if result is not None or (reconciler is not None and reconciler.failed(request_id)):
-                            break
-                        if receiver is None or receiver.overflow:
-                            break
-                        collect_events()
-                        result = reconciler.reconcile_chunk(request_id, raw_text, token_ids) if reconciler is not None else None
-                    telemetry_failed = bool(reconciler and reconciler.failed(request_id))
-                    if receiver is None or receiver.overflow or telemetry_failed or (result is None and self.config.mode == "auto"):
-                        if self.config.mode == "exact":
-                            raise ExactTelemetryError("SSE chunk does not exactly match scheduler telemetry")
-                        auto_downgraded = True
-                        result = None
-
-                if self.config.mode == "exact":
-                    if receiver is None or receiver.overflow or telemetry_failed or result is None:
-                        raise ExactTelemetryError("exact telemetry is unavailable or has gaps")
-                    events = tuple(result.events)
-                    terminal_matched = terminal_matched or any(event.finished for event in events)
-                    for event in events:
-                        safe = sanitize_terminal(event.text)
-                        painted, color = self._paint(safe, step_id=event.step_id)
-                        yield StreamChunk(
-                            request_id, sequence, painted,
-                            tuple(event.token_ids), event.finished, "EXACT SCHEDULER STEP",
-                            color, event.step_id, event.text,
-                        )
-                        sequence += 1
-                elif result is not None and not auto_downgraded:
-                    events = tuple(result.events)
-                    terminal_matched = terminal_matched or any(event.finished for event in events)
-                    for event in events:
-                        safe = sanitize_terminal(event.text)
-                        painted, color = self._paint(safe, step_id=event.step_id)
-                        yield StreamChunk(
-                            request_id, sequence, painted,
-                            tuple(event.token_ids), event.finished, "EXACT SCHEDULER STEP",
-                            color, event.step_id, event.text,
-                        )
-                        sequence += 1
-                else:
-                    safe = sanitize_terminal(raw_text)
-                    painted, color = self._paint(safe, color=PALETTE[sequence % len(PALETTE)])
+                if reconciler is not None and not auto_downgraded:
+                    if not raw_text and not token_ids and reconciler.completed(request_id):
+                        continue
+                    buffered_text += raw_text
+                    buffered_ids.extend(token_ids)
+                    result = match(buffered_text, tuple(buffered_ids))
+                    if result is not None:
+                        yield from render_result(result)
+                        buffered_text = ""
+                        buffered_ids.clear()
+                        continue
+                    if not reconciler.failed(request_id) and reconciler.waiting_for_output(request_id):
+                        continue
+                    if self.config.mode == "exact":
+                        raise ExactTelemetryError("token provenance or text does not match the server output")
+                    auto_downgraded = True
+                    raw_text, token_ids = buffered_text, tuple(buffered_ids)
+                    buffered_text = ""
+                    buffered_ids.clear()
+                if raw_text or token_ids:
+                    painted, color = self._paint(raw_text, color=PALETTE[sequence % len(PALETTE)])
                     yield StreamChunk(
-                        request_id, sequence, painted,
-                        tuple(token_ids), finished, "SSE CHUNK MODE", color, None, raw_text,
+                        request_id, sequence, painted, tuple(token_ids), finished,
+                        "SSE CHUNK MODE", color, None, raw_text,
                     )
                     sequence += 1
-            if self.config.mode == "exact" and (
-                receiver is None or receiver.overflow or not seen or not terminal_matched or reconciler is None or reconciler.failed(request_id)
-            ):
-                raise ExactTelemetryError("exact telemetry was absent or incomplete")
+            if reconciler is not None and not auto_downgraded and not reconciler.completed(request_id):
+                result = match(buffered_text, tuple(buffered_ids))
+                if result is not None:
+                    yield from render_result(result)
+                    buffered_text = ""
+                    buffered_ids.clear()
+                if self.config.mode == "exact" and (
+                    receiver is None or receiver.overflow or not reconciler.completed(request_id)
+                ):
+                    raise ExactTelemetryError("token provenance was absent or incomplete")
+                if self.config.mode == "auto" and (buffered_text or buffered_ids):
+                    painted, color = self._paint(buffered_text, color=PALETTE[sequence % len(PALETTE)])
+                    yield StreamChunk(
+                        request_id, sequence, painted, tuple(buffered_ids), False,
+                        "SSE CHUNK MODE", color, None, buffered_text,
+                    )
         finally:
-            close = getattr(response, "close", None)
-            if close:
-                close()
+            response.close()
 
     def stream(self, prompt: str | None = None, stream_index: int = 0) -> Iterator[StreamChunk]:
         run_id = _new_run_id()
@@ -485,9 +514,15 @@ class ParallelHueClient:
                 receiver.close()
 
     def stream_many(self, prompts: Sequence[str] | None = None) -> Iterator[StreamChunk]:
-        values = list(prompts if prompts is not None else [self.config.prompt])
-        if not values:
-            return
+        if prompts is None:
+            values = [self.config.prompt]
+        else:
+            if isinstance(prompts, (str, bytes)):
+                validate_prompt_values(prompts, source="stream_many prompts")
+            values = list(prompts)
+            if not values:
+                return
+            values = validate_prompt_values(values, source="stream_many prompts")
         run_id = _new_run_id()
         receiver = UnixTelemetryReceiver(run_id, self.config.socket_dir) if self.config.mode in {"exact", "auto"} else None
         cancelled = threading.Event()
@@ -555,7 +590,3 @@ class ParallelHueClient:
                 receiver.close()
             for thread in locals().get("threads", ()):
                 thread.join(timeout=1)
-
-
-def mode_label(mode: str) -> str:
-    return {"exact": "EXACT SCHEDULER STEP", "auto": "AUTO", "chunk": "SSE CHUNK MODE"}[mode]

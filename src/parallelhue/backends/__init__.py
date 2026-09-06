@@ -7,11 +7,13 @@ from .base import BackendProfile
 from .dspark import PROFILE as DSPARK_PROFILE
 from .generic import PROFILE as GENERIC_PROFILE
 from .mtp import PROFILE as MTP_PROFILE
+from .dflash import PROFILE as DFLASH_PROFILE
 
 _PROFILES = {
     GENERIC_PROFILE.name: GENERIC_PROFILE,
     MTP_PROFILE.name: MTP_PROFILE,
     DSPARK_PROFILE.name: DSPARK_PROFILE,
+    DFLASH_PROFILE.name: DFLASH_PROFILE,
 }
 
 
@@ -28,6 +30,8 @@ def _infer_backend(model: str | None) -> str:
     ).lower()
     if "dspark" in environment:
         return "dspark"
+    if "dflash" in environment:
+        return "dflash"
     if "mtp" in environment:
         return "mtp"
 

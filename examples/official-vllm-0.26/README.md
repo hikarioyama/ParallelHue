@@ -67,6 +67,12 @@ the workaround as a substitute for diagnosing package compatibility.
 The client uses the same user and mode-0700 socket directory as the server.
 The measured exact CLI request used 32 completion tokens:
 
+The runner keeps its direct `--prompt` for C1. For C>1, set
+`PARALLELHUE_PROMPT_FILE=/path/to/prompts.json` (the CLI equivalent is
+`--prompt-file`) to provide at least N non-empty, exact-distinct entries.
+ParallelHue uses the first N entries in file order and rejects insufficient or
+duplicate banks before creating tmux panes or sending model requests.
+
 ```sh
 ./examples/official-vllm-0.26/run-parallelhue.example.sh exact
 ```
@@ -84,6 +90,9 @@ scheduler telemetry:
 ```sh
 ./examples/official-vllm-0.26/run-parallelhue.example.sh chunk
 ```
+
+This capture used the historical scheduler-step protocol (schema v1), not the
+current token-provenance protocol (schema v2).
 
 The positive live result was `PASS` for both modes (`n=1` each); each is a
 single-run compatibility/exactness observation, not a repeated same-condition
